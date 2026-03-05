@@ -19,8 +19,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -30,23 +28,20 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri app (Apple Silicon)
-        run: npx tauri build --target aarch64-apple-darwin
+      - name: Build Tauri app
+        run: npx tauri build
 
-      - name: Build Tauri app (Intel)
-        run: npx tauri build --target x86_64-apple-darwin
-
-      - name: Upload macOS DMG (Apple Silicon)
+      - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: MuralMapper-macOS-arm64
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          name: MuralMapper-macOS
+          path: src-tauri/target/release/bundle/dmg/*.dmg
 
-      - name: Upload macOS DMG (Intel)
+      - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: MuralMapper-macOS-x64
-          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          name: MuralMapper-macOS-app
+          path: src-tauri/target/release/bundle/macos/*.app
 
   build-windows:
     runs-on: windows-latest
