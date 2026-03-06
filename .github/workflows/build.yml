@@ -35,13 +35,20 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npx tauri build --target ${{ matrix.target }}
+        run: npx tauri build --target ${{ matrix.target }} --bundles app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
 
-      - name: Upload macOS DMG
+      - name: Zip the .app bundle
+        run: |
+          cd src-tauri/target/${{ matrix.target }}/release/bundle/macos
+          zip -r "$GITHUB_WORKSPACE/MuralMapper-${{ matrix.target }}.zip" "Mural Mapper.app"
+
+      - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: MuralMapper-macOS-${{ matrix.target }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          name: MuralMapper-${{ matrix.target }}
+          path: MuralMapper-${{ matrix.target }}.zip
 
   build-windows:
     runs-on: windows-latest
@@ -90,9 +97,14 @@ jobs:
           path: artifacts
 
       - name: List artifacts
-        run: find artifacts -type f | head -20
+        run: find artifacts -type f
 
-      - name: Create or update release
+      - name: Delete existing release if present
+        run: gh release delete latest --yes 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
@@ -103,17 +115,19 @@ jobs:
           body: |
             Latest build of Mural Mapper.
 
-            **macOS (Apple Silicon M1/M2/M3):** Download `MuralMapper-macOS-aarch64-apple-darwin`
-            **macOS (Intel):** Download `MuralMapper-macOS-x86_64-apple-darwin`
-            **Windows:** Download `MuralMapper-Windows`
+            **macOS (Apple Silicon M1/M2/M3/M4):** `MuralMapper-aarch64-apple-darwin.zip`
+            **macOS (Intel):** `MuralMapper-x86_64-apple-darwin.zip`
+            **Windows:** `.msi` or `.exe` installer
 
-            ### macOS install
-            ```bash
-            # After downloading the .dmg, open it, drag to Applications, then run:
-            xattr -cr /Applications/Mural\ Mapper.app
-            # Now open it normally
+            ### macOS install instructions
+            ```
+            cd ~/Downloads
+            unzip MuralMapper-aarch64-apple-darwin.zip
+            mv "Mural Mapper.app" /Applications/
+            xattr -cr "/Applications/Mural Mapper.app"
+            open "/Applications/Mural Mapper.app"
             ```
           files: |
-            artifacts/**/*.dmg
+            artifacts/**/*.zip
             artifacts/**/*.msi
             artifacts/**/*.exe
