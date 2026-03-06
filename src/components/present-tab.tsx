@@ -187,6 +187,7 @@ function drawAffineTriangle(
 export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const wallListRef = useRef<HTMLDivElement>(null);
 
   const [wallIdx, setWallIdx] = useState(0);
   const [muralIdx, setMuralIdx] = useState(0);
@@ -357,6 +358,14 @@ export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
   useLayoutEffect(() => {
     redraw();
   }, [wallIdx, muralIdx, walls, redraw]);
+
+  /* auto-scroll sidebar to selected wall */
+  useEffect(() => {
+    const list = wallListRef.current;
+    if (!list) return;
+    const el = list.children[wallIdx] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [wallIdx]);
 
   /* ResizeObserver */
   useEffect(() => {
@@ -783,7 +792,7 @@ export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
         <div className="w-[120px] shrink-0 bg-black/80 backdrop-blur-sm border-r border-white/10 flex flex-col overflow-hidden">
           <div className="p-2 flex-1 overflow-y-auto hide-scrollbar">
             <p className="text-[10px] font-semibold text-white/40 uppercase tracking-wide mb-1.5">Walls</p>
-            <div className="space-y-1">
+            <div ref={wallListRef} className="space-y-1">
               {presentable.map((entry, i) => (
                 <button
                   key={entry.wall.id}

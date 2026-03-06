@@ -1,8 +1,10 @@
 // ImageBitmap-based cache — all decoding happens off the main thread
 // Thumbnails are tiny JPEGs (~5KB), full bitmaps are cached per file
+// Full bitmaps use LRU eviction to avoid GPU memory exhaustion on WebKit
 
 const THUMB_SIZE = 150;
-const bitmapCache = new Map<string, ImageBitmap>();
+const MAX_CACHED_BITMAPS = 15; // ~15 large images before evicting oldest
+const bitmapCache = new Map<string, ImageBitmap>(); // insertion order = LRU order
 const thumbCache = new Map<string, string>();
 const fileKeys = new WeakMap<File | Blob, string>();
 let keyCounter = 0;
@@ -18,6 +20,17 @@ function getKey(file: File | Blob): string {
     fileKeys.set(file, key);
   }
   return key;
+}
+
+// Evict oldest entries when cache exceeds limit
+function enforceCacheLimit() {
+  while (bitmapCache.size > MAX_CACHED_BITMAPS) {
+    const oldest = bitmapCache.keys().next().value;
+    if (oldest === undefined) break;
+    const bmp = bitmapCache.get(oldest);
+    if (bmp) bmp.close();
+    bitmapCache.delete(oldest);
+  }
 }
 
 // Generate a tiny JPEG thumbnail URL — decode + resize runs off main thread
@@ -61,14 +74,20 @@ export async function generateThumbsBatch(
   }
 }
 
-// Get full-size ImageBitmap — decoded off main thread, cached
+// Get full-size ImageBitmap — decoded off main thread, LRU cached
 export async function getFullBitmap(file: File | Blob): Promise<ImageBitmap> {
   const key = getKey(file);
   const cached = bitmapCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    // Move to end (most recently used)
+    bitmapCache.delete(key);
+    bitmapCache.set(key, cached);
+    return cached;
+  }
 
   const bitmap = await createImageBitmap(file);
   bitmapCache.set(key, bitmap);
+  enforceCacheLimit();
   return bitmap;
 }
 
@@ -109,7 +128,7 @@ export function drawFitted(
   ctx.drawImage(bitmap, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
-// Preload all images during idle time
+// Preload thumbnails during idle time (full bitmaps loaded on-demand with LRU)
 export function preloadAll(
   files: (File | Blob)[],
   onProgress?: (loaded: number, total: number) => void,
@@ -129,20 +148,7 @@ export function preloadAll(
       if (cancelled) return;
       const file = files[index];
       const key = getKey(file);
-      // Skip if already cached
-      if (!bitmapCache.has(key)) {
-        try {
-          const bitmap = await createImageBitmap(file);
-          if (!cancelled) {
-            bitmapCache.set(key, bitmap);
-          } else {
-            bitmap.close();
-          }
-        } catch {
-          // Skip failed images
-        }
-      }
-      // Also generate thumb if not cached
+      // Only preload thumbnails — full bitmaps are loaded on-demand with LRU eviction
       if (!thumbCache.has(key)) {
         try {
           await generateThumb(file);
