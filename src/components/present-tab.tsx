@@ -272,7 +272,19 @@ export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
     const currentMuralIdx = muralIdxRef.current;
 
     // Draw wall image fitted
-    const wallBitmap = await getFullBitmap(wall.blob);
+    let wallBitmap: ImageBitmap;
+    try {
+      wallBitmap = await getFullBitmap(wall.blob);
+    } catch {
+      // Draw error placeholder
+      ctx.fillStyle = '#333';
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.fillStyle = '#888';
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Failed to load wall image', cw / 2, ch / 2);
+      return;
+    }
 
     const crop = wall.crop;
     const sx = crop?.x ?? 0;
@@ -302,37 +314,41 @@ export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
       const mural = quadObj.murals[Math.min(currentMuralIdx, quadObj.murals.length - 1)];
       if (!mural || !quadObj.corners) continue;
 
-      const muralBitmap = await getFullBitmap(mural.file);
+      try {
+        const muralBitmap = await getFullBitmap(mural.file);
 
-      const quadCanvasPts = quadObj.corners.map(toCanvas);
-      const qw = (dist(quadCanvasPts[0], quadCanvasPts[1]) + dist(quadCanvasPts[3], quadCanvasPts[2])) / 2;
-      const qh = (dist(quadCanvasPts[0], quadCanvasPts[3]) + dist(quadCanvasPts[1], quadCanvasPts[2])) / 2;
-      const quadAspect = qh > 0 ? qw / qh : 1;
+        const quadCanvasPts = quadObj.corners.map(toCanvas);
+        const qw = (dist(quadCanvasPts[0], quadCanvasPts[1]) + dist(quadCanvasPts[3], quadCanvasPts[2])) / 2;
+        const qh = (dist(quadCanvasPts[0], quadCanvasPts[3]) + dist(quadCanvasPts[1], quadCanvasPts[2])) / 2;
+        const quadAspect = qh > 0 ? qw / qh : 1;
 
-      const clipL = mural.clipLeft ?? 0;
-      const clipR = mural.clipRight ?? 0;
-      const clipT = mural.clipTop ?? 0;
-      const clipB = mural.clipBottom ?? 0;
-      if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
-        const quadCanvasCorners = quadObj.corners.map(toCanvas) as [Corner, Corner, Corner, Corner];
-        ctx.save();
-        applyClipMask(ctx, clipL, clipR, clipT, clipB, quadCanvasCorners);
-      }
+        const clipL = mural.clipLeft ?? 0;
+        const clipR = mural.clipRight ?? 0;
+        const clipT = mural.clipTop ?? 0;
+        const clipB = mural.clipBottom ?? 0;
+        if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
+          const quadCanvasCorners = quadObj.corners.map(toCanvas) as [Corner, Corner, Corner, Corner];
+          ctx.save();
+          applyClipMask(ctx, clipL, clipR, clipT, clipB, quadCanvasCorners);
+        }
 
-      drawWarpedMural(
-        ctx,
-        muralBitmap,
-        quadObj.corners,
-        mural.scale,
-        mural.offsetX,
-        mural.offsetY,
-        mural.rotation ?? 0,
-        toCanvas,
-        quadAspect,
-      );
+        drawWarpedMural(
+          ctx,
+          muralBitmap,
+          quadObj.corners,
+          mural.scale,
+          mural.offsetX,
+          mural.offsetY,
+          mural.rotation ?? 0,
+          toCanvas,
+          quadAspect,
+        );
 
-      if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
-        ctx.restore();
+        if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
+          ctx.restore();
+        }
+      } catch (err) {
+        console.warn('Failed to render quad mural:', err);
       }
     }
   }, []);

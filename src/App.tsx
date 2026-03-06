@@ -592,27 +592,6 @@ export default function App() {
     setWalls(next);
   }, [redoStack, walls]);
 
-  /* ---- global keyboard shortcuts for undo/redo ---- */
-  useEffect(() => {
-    if (mode !== 'workspace') return;
-    const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault();
-        handleUndo();
-      } else if (
-        (e.ctrlKey || e.metaKey) &&
-        ((e.key === 'z' && e.shiftKey) || e.key === 'y')
-      ) {
-        e.preventDefault();
-        handleRedo();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [mode, handleUndo, handleRedo]);
-
   /* ---- project file export ---- */
   const handleExportProject = useCallback(async () => {
     try {
@@ -642,6 +621,30 @@ export default function App() {
       console.error('Export failed:', err);
     }
   }, [projectName, walls, muralPool]);
+
+  /* ---- global keyboard shortcuts for undo/redo/save ---- */
+  useEffect(() => {
+    if (mode !== 'workspace') return;
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        ((e.key === 'z' && e.shiftKey) || e.key === 'y')
+      ) {
+        e.preventDefault();
+        handleRedo();
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        handleExportProject();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [mode, handleUndo, handleRedo, handleExportProject]);
 
   /* ---- project file import ---- */
   const handleImportProject = useCallback(async () => {
@@ -759,10 +762,10 @@ export default function App() {
             <button
               onClick={handleExportProject}
               className="flex items-center gap-1 px-2 py-1 text-[12px] text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors"
-              title="Export project (.mmp)"
+              title="Save project as .mmp file (Ctrl+Shift+S)"
             >
               <Download className="w-3.5 h-3.5" />
-              Export
+              Save As
             </button>
           </div>
           {/* Undo / Redo */}

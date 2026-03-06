@@ -450,8 +450,13 @@ export function MuralsTab({
   } | null>(null);
 
   const selectedWall = walls[selectedIdx];
-  const hasQuad = selectedWall?.quads.length > 0 && !!selectedWall.quads[activeQuadIdx]?.corners;
-  const activeQuad = hasQuad ? selectedWall.quads[activeQuadIdx] : undefined;
+  // Clamp activeQuadIdx if it exceeds the wall's quad count (e.g. after wall deletion)
+  if (selectedWall && activeQuadIdx >= selectedWall.quads.length && selectedWall.quads.length > 0) {
+    setActiveQuadIdx(selectedWall.quads.length - 1);
+  }
+  const safeQuadIdx = selectedWall ? Math.min(activeQuadIdx, Math.max(0, selectedWall.quads.length - 1)) : 0;
+  const hasQuad = selectedWall?.quads.length > 0 && !!selectedWall.quads[safeQuadIdx]?.corners;
+  const activeQuad = hasQuad ? selectedWall.quads[safeQuadIdx] : undefined;
   const activeMural = activeQuad?.murals[activeMuralIdx];
 
   /* ---- inverse bilerp: canvas coords -> quad UV -------------------- */
@@ -522,7 +527,14 @@ export function MuralsTab({
 
     setLoading(true);
     try {
-      const wallBitmap = await getFullBitmap(w.blob);
+      let wallBitmap: ImageBitmap;
+      try {
+        wallBitmap = await getFullBitmap(w.blob);
+      } catch {
+        ctx.restore();
+        setLoading(false);
+        return;
+      }
       if (selectedRef.current !== selectedIdx) { ctx.restore(); return; }
 
       // Source region (full image or crop)
@@ -562,28 +574,36 @@ export function MuralsTab({
 
         // Cache layout for active quad's drag calculations
         if (isActive && mural) {
-          const muralBitmapForLayout = await getFullBitmap(mural.file);
-          const muralAspect = muralBitmapForLayout.width / muralBitmapForLayout.height;
-          layoutRef.current = { dx, dy, dw, dh, quadCanvas, muralAspect, quadAspect };
+          try {
+            const muralBitmapForLayout = await getFullBitmap(mural.file);
+            const muralAspect = muralBitmapForLayout.width / muralBitmapForLayout.height;
+            layoutRef.current = { dx, dy, dw, dh, quadCanvas, muralAspect, quadAspect };
+          } catch {
+            layoutRef.current = null;
+          }
         }
 
         if (mural) {
-          const muralBitmap = await getFullBitmap(mural.file);
-          if (selectedRef.current !== selectedIdx) return;
-          const rot = mural.rotation ?? 0;
+          try {
+            const muralBitmap = await getFullBitmap(mural.file);
+            if (selectedRef.current !== selectedIdx) return;
+            const rot = mural.rotation ?? 0;
 
-          ctx.save();
-          const clipL = mural.clipLeft ?? 0;
-          const clipR = mural.clipRight ?? 0;
-          const clipT = mural.clipTop ?? 0;
-          const clipB = mural.clipBottom ?? 0;
-          if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
-            applyClipMask(ctx, clipL, clipR, clipT, clipB, quadCanvas);
+            ctx.save();
+            const clipL = mural.clipLeft ?? 0;
+            const clipR = mural.clipRight ?? 0;
+            const clipT = mural.clipTop ?? 0;
+            const clipB = mural.clipBottom ?? 0;
+            if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
+              applyClipMask(ctx, clipL, clipR, clipT, clipB, quadCanvas);
+            }
+            ctx.globalAlpha = (mural.opacity ?? 1) * (isActive ? 1 : 0.7);
+            ctx.globalCompositeOperation = mural.blendMode ?? 'source-over';
+            drawWarped(ctx, muralBitmap, quadCanvas, mural.scale, mural.offsetX, mural.offsetY, rot, quadAspect);
+            ctx.restore();
+          } catch (err) {
+            console.warn('Failed to render mural:', err);
           }
-          ctx.globalAlpha = (mural.opacity ?? 1) * (isActive ? 1 : 0.7);
-          ctx.globalCompositeOperation = mural.blendMode ?? 'source-over';
-          drawWarped(ctx, muralBitmap, quadCanvas, mural.scale, mural.offsetX, mural.offsetY, rot, quadAspect);
-          ctx.restore();
         }
 
         // Draw quad outline
