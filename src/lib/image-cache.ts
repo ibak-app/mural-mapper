@@ -109,6 +109,60 @@ export function drawFitted(
   ctx.drawImage(bitmap, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
+// Preload all images during idle time
+export function preloadAll(
+  files: (File | Blob)[],
+  onProgress?: (loaded: number, total: number) => void,
+): () => void {
+  let cancelled = false;
+  let loaded = 0;
+  const total = files.length;
+
+  const preloadNext = (index: number) => {
+    if (cancelled || index >= files.length) return;
+
+    const schedule = typeof requestIdleCallback !== 'undefined'
+      ? requestIdleCallback
+      : (cb: () => void) => setTimeout(cb, 16);
+
+    schedule(async () => {
+      if (cancelled) return;
+      const file = files[index];
+      const key = getKey(file);
+      // Skip if already cached
+      if (!bitmapCache.has(key)) {
+        try {
+          const bitmap = await createImageBitmap(file);
+          if (!cancelled) {
+            bitmapCache.set(key, bitmap);
+          } else {
+            bitmap.close();
+          }
+        } catch {
+          // Skip failed images
+        }
+      }
+      // Also generate thumb if not cached
+      if (!thumbCache.has(key)) {
+        try {
+          await generateThumb(file);
+        } catch {
+          // Skip
+        }
+      }
+      loaded++;
+      onProgress?.(loaded, total);
+      preloadNext(index + 1);
+    });
+  };
+
+  preloadNext(0);
+
+  return () => {
+    cancelled = true;
+  };
+}
+
 // Evict cached data for a file
 export function evict(file: File | Blob) {
   const key = getKey(file);

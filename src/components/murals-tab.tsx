@@ -5,16 +5,18 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { ImagePlus, Copy, Trash2, Loader2, RotateCcw, Lock, Unlock, Heart, ZoomIn, ZoomOut } from 'lucide-react';
+import { ImagePlus, Copy, Trash2, Loader2, RotateCcw, Lock, Unlock, Heart, ZoomIn, ZoomOut, Link, Maximize, Square, Crosshair, ClipboardCopy, ClipboardPaste, X, FolderOpen, Grid3X3, Shuffle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getFullBitmap, generateThumb } from '@/lib/image-cache';
-import type { Wall, MuralPlacement, Corner } from '@/App';
+import type { Wall, MuralPlacement, Corner, MuralPoolEntry } from '@/App';
 
 interface MuralsTabProps {
   walls: Wall[];
-  onWallsChange: (walls: Wall[]) => void;
+  onWallsChange: (walls: Wall[], changedIdx?: number) => void;
   selectedIdx: number;
   onSelectIdx: (idx: number) => void;
+  muralPool: MuralPoolEntry[];
+  onMuralPoolChange: (pool: MuralPoolEntry[]) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -38,6 +40,64 @@ function bilerp(tl: Corner, tr: Corner, br: Corner, bl: Corner, u: number, v: nu
   const bot = lerp(bl, br, u);
   return lerp(top, bot, v);
 }
+
+/* ------------------------------------------------------------------ */
+/*  Clip mask helper                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Apply a clip path within the quad before drawing the mural.
+ * Uses 4 independent clip values (0-0.45) for each edge.
+ * quad: the 4 corners in canvas coords [TL, TR, BR, BL].
+ */
+function applyClipMask(
+  ctx: CanvasRenderingContext2D,
+  clipLeft: number,
+  clipRight: number,
+  clipTop: number,
+  clipBottom: number,
+  quad: [Corner, Corner, Corner, Corner],
+) {
+  if (clipLeft <= 0 && clipRight <= 0 && clipTop <= 0 && clipBottom <= 0) return;
+  const [tl, tr, br, bl] = quad;
+  const u0 = Math.min(clipLeft, 0.45);
+  const u1 = 1 - Math.min(clipRight, 0.45);
+  const v0 = Math.min(clipTop, 0.45);
+  const v1 = 1 - Math.min(clipBottom, 0.45);
+
+  const c00 = bilerp(tl, tr, br, bl, u0, v0);
+  const c10 = bilerp(tl, tr, br, bl, u1, v0);
+  const c11 = bilerp(tl, tr, br, bl, u1, v1);
+  const c01 = bilerp(tl, tr, br, bl, u0, v1);
+
+  ctx.beginPath();
+  ctx.moveTo(c00.x, c00.y);
+  ctx.lineTo(c10.x, c10.y);
+  ctx.lineTo(c11.x, c11.y);
+  ctx.lineTo(c01.x, c01.y);
+  ctx.closePath();
+  ctx.clip();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Placement settings for copy/paste                                  */
+/* ------------------------------------------------------------------ */
+
+interface PlacementSettings {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  rotation: number;
+  opacity: number;
+  blendMode: GlobalCompositeOperation;
+  clipLeft: number;
+  clipRight: number;
+  clipTop: number;
+  clipBottom: number;
+}
+
+// Module-level clipboard so it persists across re-renders
+let copiedSettings: PlacementSettings | null = null;
 
 /* ------------------------------------------------------------------ */
 /*  Perspective warp: draw mural into a quad via triangle subdivision  */
@@ -247,6 +307,13 @@ const Thumb = React.memo<ThumbProps>(function Thumb({
         <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-purple-400 border border-white" />
       )}
 
+      {/* link indicator */}
+      {wall.quads.some(q => q.linkId) && (
+        <span className="absolute top-1 left-1" title="Linked wall — murals sync">
+          <Link className="w-2.5 h-2.5 text-amber-400 drop-shadow-sm" />
+        </span>
+      )}
+
       {/* dimmed overlay if no quad */}
       {!hasQuad && (
         <div className="absolute inset-0 bg-gray-500/20" />
@@ -278,7 +345,7 @@ const MuralThumb = React.memo<MuralThumbProps>(function MuralThumb({
         'relative w-full aspect-[4/3] rounded-md overflow-hidden cursor-pointer border-2 transition-all',
         selected ? 'border-blue-500 ring-2 ring-blue-300' : 'border-gray-200 hover:border-gray-400',
       )}
-      onClick={() => onSelect(index)}
+      onClick={(e) => { e.stopPropagation(); onSelect(index); }}
     >
       {mural.thumbUrl ? (
         <img
@@ -324,26 +391,34 @@ export function MuralsTab({
   onWallsChange,
   selectedIdx,
   onSelectIdx,
+  muralPool,
+  onMuralPoolChange,
 }: MuralsTabProps) {
+  const [loading, setLoading] = useState(false);
+  const [activeMuralIdx, setActiveMuralIdx] = useState(0);
+  const [activeQuadIdx, setActiveQuadIdx] = useState(0);
+  const [rotationLocked, setRotationLocked] = useState(true);
+
   /* refs to avoid stale closures */
   const wallsRef = useRef(walls);
   wallsRef.current = walls;
   const selectedRef = useRef(selectedIdx);
   selectedRef.current = selectedIdx;
+  const activeQuadIdxRef = useRef(activeQuadIdx);
+  activeQuadIdxRef.current = activeQuadIdx;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const thumbListRef = useRef<HTMLDivElement>(null);
   const muralInputRef = useRef<HTMLInputElement>(null);
-
-  const [loading, setLoading] = useState(false);
-  const [activeMuralIdx, setActiveMuralIdx] = useState(0);
-  const [rotationLocked, setRotationLocked] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panStartRef = useRef({ x: 0, y: 0 });
   const mouseStartRef = useRef({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const [showMuralPicker, setShowMuralPicker] = useState(false);
+  const [selectedPoolIds, setSelectedPoolIds] = useState<Set<string>>(new Set());
+  const [pickerTab, setPickerTab] = useState<'files' | 'library'>('library');
   const rafRef = useRef<number | null>(null);
 
   // Drag state
@@ -357,8 +432,9 @@ export function MuralsTab({
   } | null>(null);
 
   const selectedWall = walls[selectedIdx];
-  const hasQuad = !!selectedWall?.quad;
-  const activeMural = hasQuad ? selectedWall?.murals[activeMuralIdx] : undefined;
+  const hasQuad = selectedWall?.quads.length > 0 && !!selectedWall.quads[activeQuadIdx]?.corners;
+  const activeQuad = hasQuad ? selectedWall.quads[activeQuadIdx] : undefined;
+  const activeMural = activeQuad?.murals[activeMuralIdx];
 
   /* ---- inverse bilerp: canvas coords -> quad UV -------------------- */
 
@@ -450,13 +526,14 @@ export function MuralsTab({
       ctx.drawImage(wallBitmap, sx, sy, sw, sh, dx, dy, dw, dh);
 
       // Draw mural warped into quad
-      const mural = w.murals[activeMuralIdx];
-      if (w.quad && mural) {
+      const quadObj = w.quads[activeQuadIdxRef.current];
+      const mural = quadObj?.murals[activeMuralIdx];
+      if (quadObj?.corners && mural) {
         const muralBitmap = await getFullBitmap(mural.file);
         if (selectedRef.current !== selectedIdx) return;
 
         // Map normalized quad coords (0-1 relative to source image region) to canvas coords
-        const quadCanvas: [Corner, Corner, Corner, Corner] = w.quad.map((corner) => ({
+        const quadCanvas: [Corner, Corner, Corner, Corner] = quadObj.corners.map((corner) => ({
           x: dx + corner.x * dw,
           y: dy + corner.y * dh,
         })) as [Corner, Corner, Corner, Corner];
@@ -473,6 +550,16 @@ export function MuralsTab({
         layoutRef.current = { dx, dy, dw, dh, quadCanvas, muralAspect, quadAspect };
 
         ctx.save();
+        // Apply clip mask if set
+        const clipL = mural.clipLeft ?? 0;
+        const clipR = mural.clipRight ?? 0;
+        const clipT = mural.clipTop ?? 0;
+        const clipB = mural.clipBottom ?? 0;
+        if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
+          applyClipMask(ctx, clipL, clipR, clipT, clipB, quadCanvas);
+        }
+        ctx.globalAlpha = mural.opacity ?? 1;
+        ctx.globalCompositeOperation = mural.blendMode ?? 'source-over';
         drawWarped(
           ctx,
           muralBitmap,
@@ -498,6 +585,31 @@ export function MuralsTab({
         ctx.closePath();
         ctx.stroke();
         ctx.restore();
+
+        // Draw clip region outline if active
+        if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
+          const [qtl2, qtr2, qbr2, qbl2] = quadCanvas;
+          const cu0 = Math.min(clipL, 0.45);
+          const cu1 = 1 - Math.min(clipR, 0.45);
+          const cv0 = Math.min(clipT, 0.45);
+          const cv1 = 1 - Math.min(clipB, 0.45);
+          const cc = [
+            bilerp(qtl2, qtr2, qbr2, qbl2, cu0, cv0),
+            bilerp(qtl2, qtr2, qbr2, qbl2, cu1, cv0),
+            bilerp(qtl2, qtr2, qbr2, qbl2, cu1, cv1),
+            bilerp(qtl2, qtr2, qbr2, qbl2, cu0, cv1),
+          ];
+          ctx.save();
+          ctx.strokeStyle = 'rgba(245,158,11,0.6)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(cc[0].x, cc[0].y);
+          cc.slice(1).forEach(c => ctx.lineTo(c.x, c.y));
+          ctx.closePath();
+          ctx.stroke();
+          ctx.restore();
+        }
 
         // Draw mural bounding rectangle corners as handles
         const cornersUV = getMuralCornersUV(
@@ -556,9 +668,9 @@ export function MuralsTab({
         ctx.stroke();
         ctx.restore();
 
-      } else if (w.quad) {
+      } else if (quadObj?.corners) {
         // Draw quad outline only (no mural selected)
-        const quadCanvas = w.quad.map((corner) => ({
+        const quadCanvas = quadObj.corners.map((corner) => ({
           x: dx + corner.x * dw,
           y: dy + corner.y * dh,
         }));
@@ -581,12 +693,20 @@ export function MuralsTab({
       ctx.restore(); // pop zoom/pan
       setLoading(false);
     }
-  }, [walls, selectedIdx, activeMuralIdx, zoom, pan]);
+  }, [walls, selectedIdx, activeMuralIdx, activeQuadIdx, zoom, pan]);
 
   /* redraw on selection or mural change */
   useLayoutEffect(() => {
     redraw();
   }, [redraw]);
+
+  /* Close mural picker on Escape */
+  useEffect(() => {
+    if (!showMuralPicker) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowMuralPicker(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showMuralPicker]);
 
   /* ResizeObserver */
   useEffect(() => {
@@ -633,8 +753,9 @@ export function MuralsTab({
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const layout = layoutRef.current;
     const w = wallsRef.current[selectedRef.current];
-    const mural = w?.murals[activeMuralIdx];
-    if (!layout || !mural || !w?.quad) return;
+    const qObj = w?.quads[activeQuadIdxRef.current];
+    const mural = qObj?.murals[activeMuralIdx];
+    if (!layout || !mural || !qObj?.corners) return;
 
     const { x: mx, y: my } = getCanvasXY(e);
     const rot = mural.rotation ?? 0;
@@ -701,8 +822,9 @@ export function MuralsTab({
 
     const layout = layoutRef.current;
     const w = wallsRef.current[selectedRef.current];
-    const mural = w?.murals[activeMuralIdx];
-    if (!layout || !mural || !w?.quad) return;
+    const qObj = w?.quads[activeQuadIdxRef.current];
+    const mural = qObj?.murals[activeMuralIdx];
+    if (!layout || !mural || !qObj?.corners) return;
 
     const { x: mx, y: my } = getCanvasXY(e);
     const { quadCanvas, muralAspect, quadAspect } = layout;
@@ -762,14 +884,19 @@ export function MuralsTab({
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
+      // Skip arrow keys if a button in the sidebar has focus (e.g. after clicking a mural thumb)
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active.closest('[data-sidebar]')) return;
+
       // Left/Right: cycle mural alternatives
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         const dir = e.key === 'ArrowLeft' ? -1 : 1;
         setActiveMuralIdx(prev => {
           const w = wallsRef.current[selectedRef.current];
-          if (!w || w.murals.length === 0) return prev;
-          return Math.max(0, Math.min(w.murals.length - 1, prev + dir));
+          const qMurals = w?.quads[activeQuadIdxRef.current]?.murals;
+          if (!qMurals || qMurals.length === 0) return prev;
+          return Math.max(0, Math.min(qMurals.length - 1, prev + dir));
         });
         return;
       }
@@ -793,10 +920,10 @@ export function MuralsTab({
           let next = cur + pending!;
           next = Math.max(0, Math.min(ws.length - 1, next));
           // Skip walls without quad
-          while (next >= 0 && next < ws.length && !ws[next].quad) {
+          while (next >= 0 && next < ws.length && ws[next].quads.length === 0) {
             next += pending! > 0 ? 1 : -1;
           }
-          if (next >= 0 && next < ws.length && ws[next].quad && next !== cur) {
+          if (next >= 0 && next < ws.length && ws[next].quads.length > 0 && next !== cur) {
             onSelectIdx(next);
           }
           pending = null;
@@ -821,12 +948,18 @@ export function MuralsTab({
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [selectedIdx]);
 
-  /* reset active mural index and zoom when wall changes */
+  /* reset active mural index, quad index, and zoom when wall changes */
   useEffect(() => {
     setActiveMuralIdx(0);
+    setActiveQuadIdx(0);
     setZoom(1);
     setPan({ x: 0, y: 0 });
   }, [selectedIdx]);
+
+  /* reset drag state when active mural changes to prevent stale drags */
+  useEffect(() => {
+    dragRef.current = { kind: 'none' };
+  }, [activeMuralIdx]);
 
   /* ---- mural mutation helpers ------------------------------------- */
 
@@ -843,10 +976,16 @@ export function MuralsTab({
     (wallIdx: number, muralIdx: number, patch: Partial<MuralPlacement>) => {
       const cur = [...wallsRef.current];
       const w = cur[wallIdx];
-      const murals = [...w.murals];
+      const qi = activeQuadIdxRef.current;
+      if (!w.quads[qi]) return;
+      const quads = [...w.quads];
+      const quad = { ...quads[qi] };
+      const murals = [...quad.murals];
       murals[muralIdx] = { ...murals[muralIdx], ...patch };
-      cur[wallIdx] = { ...w, murals };
-      onWallsChange(cur);
+      quad.murals = murals;
+      quads[qi] = quad;
+      cur[wallIdx] = { ...w, quads };
+      onWallsChange(cur, wallIdx);
     },
     [onWallsChange],
   );
@@ -860,13 +999,16 @@ export function MuralsTab({
 
       const fileArr = Array.from(files);
       const idx = selectedRef.current;
+      const qi = activeQuadIdxRef.current;
       const cur = [...wallsRef.current];
       const w = cur[idx];
-      const existingCount = w.murals.length;
+      if (!w.quads[qi]) return;
+      const existingCount = w.quads[qi].murals.length;
 
       // Add all files as new murals with empty thumbs first
       const newMurals: MuralPlacement[] = fileArr.map(file => ({
         id: genId(),
+        muralPoolId: genId(),
         file,
         thumbUrl: '',
         scale: 1,
@@ -876,38 +1018,61 @@ export function MuralsTab({
         comment: '',
       }));
 
-      cur[idx] = { ...w, murals: [...w.murals, ...newMurals] };
-      onWallsChange(cur);
+      const quads = [...w.quads];
+      quads[qi] = { ...quads[qi], murals: [...quads[qi].murals, ...newMurals] };
+      cur[idx] = { ...w, quads };
+      onWallsChange(cur, idx);
       setActiveMuralIdx(existingCount); // select first new one
 
-      // Generate thumbnails progressively
+      // Generate thumbnails progressively and add to mural pool
+      const newPoolEntries: MuralPoolEntry[] = [];
       for (let i = 0; i < fileArr.length; i++) {
         const thumbUrl = await generateThumb(fileArr[i]);
         const latest = [...wallsRef.current];
         const lw = latest[idx];
-        if (lw) {
-          const murals = [...lw.murals];
+        if (lw && lw.quads[qi]) {
+          const lQuads = [...lw.quads];
+          const lQuad = { ...lQuads[qi] };
+          const murals = [...lQuad.murals];
           const mi = existingCount + i;
           if (mi < murals.length) {
             murals[mi] = { ...murals[mi], thumbUrl };
-            latest[idx] = { ...lw, murals };
-            onWallsChange(latest);
+            lQuad.murals = murals;
+            lQuads[qi] = lQuad;
+            latest[idx] = { ...lw, quads: lQuads };
+            onWallsChange(latest, idx);
+
+            // Also add to mural pool
+            const poolId = murals[mi].muralPoolId;
+            if (poolId && !muralPool.some(p => p.id === poolId)) {
+              newPoolEntries.push({
+                id: poolId,
+                file: fileArr[i],
+                blob: fileArr[i],
+                thumbUrl,
+              });
+            }
           }
         }
+      }
+      if (newPoolEntries.length > 0) {
+        onMuralPoolChange([...muralPool, ...newPoolEntries]);
       }
 
       e.target.value = '';
     },
-    [onWallsChange],
+    [onWallsChange, muralPool, onMuralPoolChange],
   );
 
   /* ---- duplicate mural -------------------------------------------- */
 
   const handleDuplicate = useCallback(() => {
     const idx = selectedRef.current;
+    const qi = activeQuadIdxRef.current;
     const w = wallsRef.current[idx];
-    const mural = w?.murals[activeMuralIdx];
-    if (!mural) return;
+    const qObj = w?.quads[qi];
+    const mural = qObj?.murals[activeMuralIdx];
+    if (!mural || !qObj) return;
 
     const dup: MuralPlacement = {
       ...mural,
@@ -916,9 +1081,11 @@ export function MuralsTab({
     };
 
     const cur = [...wallsRef.current];
-    const murals = [...cur[idx].murals, dup];
-    cur[idx] = { ...cur[idx], murals };
-    onWallsChange(cur);
+    const quads = [...cur[idx].quads];
+    const murals = [...quads[qi].murals, dup];
+    quads[qi] = { ...quads[qi], murals };
+    cur[idx] = { ...cur[idx], quads };
+    onWallsChange(cur, idx);
     setActiveMuralIdx(murals.length - 1);
   }, [onWallsChange, activeMuralIdx]);
 
@@ -926,16 +1093,116 @@ export function MuralsTab({
 
   const handleRemoveMural = useCallback(() => {
     const idx = selectedRef.current;
+    const qi = activeQuadIdxRef.current;
     const w = wallsRef.current[idx];
-    if (!w || w.murals.length === 0) return;
+    if (!w || !w.quads[qi] || w.quads[qi].murals.length === 0) return;
 
     const cur = [...wallsRef.current];
-    const murals = [...cur[idx].murals];
+    const quads = [...cur[idx].quads];
+    const murals = [...quads[qi].murals];
     murals.splice(activeMuralIdx, 1);
-    cur[idx] = { ...cur[idx], murals };
-    onWallsChange(cur);
+    quads[qi] = { ...quads[qi], murals };
+    cur[idx] = { ...cur[idx], quads };
+    onWallsChange(cur, idx);
     setActiveMuralIdx((prev) => Math.min(prev, Math.max(0, murals.length - 1)));
   }, [onWallsChange, activeMuralIdx]);
+
+  /* ---- auto-fit / auto-fill --------------------------------------- */
+
+  const handleAutoFit = useCallback(() => {
+    const layout = layoutRef.current;
+    const w = wallsRef.current[selectedRef.current];
+    const mural = w?.quads[activeQuadIdxRef.current]?.murals[activeMuralIdx];
+    if (!layout || !mural) return;
+    const { muralAspect, quadAspect } = layout;
+    const fitScale = Math.min(1, muralAspect / quadAspect);
+    updateMural(selectedRef.current, activeMuralIdx, {
+      scale: fitScale, offsetX: 0, offsetY: 0, rotation: 0,
+    });
+  }, [activeMuralIdx, updateMural]);
+
+  const handleAutoFill = useCallback(() => {
+    const layout = layoutRef.current;
+    const w = wallsRef.current[selectedRef.current];
+    const mural = w?.quads[activeQuadIdxRef.current]?.murals[activeMuralIdx];
+    if (!layout || !mural) return;
+    const { muralAspect, quadAspect } = layout;
+    const fillScale = Math.max(1, muralAspect / quadAspect);
+    updateMural(selectedRef.current, activeMuralIdx, {
+      scale: fillScale, offsetX: 0, offsetY: 0, rotation: 0,
+    });
+  }, [activeMuralIdx, updateMural]);
+
+  /* ---- snap center ------------------------------------------------ */
+
+  const handleSnapCenter = useCallback(() => {
+    updateMural(selectedRef.current, activeMuralIdx, { offsetX: 0, offsetY: 0 });
+  }, [activeMuralIdx, updateMural]);
+
+  /* ---- copy / paste placement settings ----------------------------- */
+
+  const handleCopySettings = useCallback(() => {
+    const w = wallsRef.current[selectedRef.current];
+    const mural = w?.quads[activeQuadIdxRef.current]?.murals[activeMuralIdx];
+    if (!mural) return;
+    copiedSettings = {
+      scale: mural.scale,
+      offsetX: mural.offsetX,
+      offsetY: mural.offsetY,
+      rotation: mural.rotation ?? 0,
+      opacity: mural.opacity ?? 1,
+      blendMode: (mural.blendMode ?? 'source-over') as GlobalCompositeOperation,
+      clipLeft: mural.clipLeft ?? 0,
+      clipRight: mural.clipRight ?? 0,
+      clipTop: mural.clipTop ?? 0,
+      clipBottom: mural.clipBottom ?? 0,
+    };
+  }, [activeMuralIdx]);
+
+  const handlePasteSettings = useCallback(() => {
+    if (!copiedSettings) return;
+    updateMural(selectedRef.current, activeMuralIdx, { ...copiedSettings });
+  }, [activeMuralIdx, updateMural]);
+
+  /* ---- double-click to set center --------------------------------- */
+
+  const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const layout = layoutRef.current;
+    const w = wallsRef.current[selectedRef.current];
+    const mural = w?.quads[activeQuadIdxRef.current]?.murals[activeMuralIdx];
+    if (!layout || !mural || !w?.quads[activeQuadIdxRef.current]?.corners) return;
+
+    const { x: mx, y: my } = getCanvasXY(e);
+    const { quadCanvas } = layout;
+    const { u, v } = canvasToQuadUV(mx, my, quadCanvas);
+
+    // Convert UV (0-1) to offset (-100 to 100)
+    const newOffsetX = (u - 0.5) * 100;
+    const newOffsetY = (v - 0.5) * 100;
+    updateMural(selectedRef.current, activeMuralIdx, {
+      offsetX: Math.max(-100, Math.min(100, newOffsetX)),
+      offsetY: Math.max(-100, Math.min(100, newOffsetY)),
+    });
+  }, [activeMuralIdx, getCanvasXY, updateMural]);
+
+  /* ---- keyboard shortcuts for copy/paste settings ------------------ */
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') {
+        e.preventDefault();
+        handleCopySettings();
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'V') {
+        e.preventDefault();
+        handlePasteSettings();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [handleCopySettings, handlePasteSettings]);
 
   /* ---- slider handlers (rAF-throttled) ---------------------------- */
 
@@ -958,9 +1225,7 @@ export function MuralsTab({
 
   /* ---- render ----------------------------------------------------- */
 
-  const muralCount = selectedWall?.murals.length ?? 0;
-  const wallsWithQuad = walls.filter((w) => !!w.quad).length;
-
+  const muralCount = activeQuad?.murals.length ?? 0;
   return (
     <div className="flex flex-col h-full">
       <div className="flex flex-1 min-h-0">
@@ -968,7 +1233,7 @@ export function MuralsTab({
         <div className="w-[100px] border-r bg-gray-50 flex flex-col">
           <div
             ref={thumbListRef}
-            className="flex-1 overflow-y-auto p-2 space-y-2 flex flex-col items-center"
+            className="flex-1 overflow-y-auto hide-scrollbar p-2 space-y-2 flex flex-col items-center"
           >
             {walls.map((w, i) => (
               <Thumb
@@ -976,8 +1241,8 @@ export function MuralsTab({
                 wall={w}
                 index={i}
                 selected={i === selectedIdx}
-                hasQuad={!!w.quad}
-                hasMurals={w.murals.length > 0}
+                hasQuad={w.quads.length > 0 && w.quads.some(q => !!q?.corners)}
+                hasMurals={w.quads.some(q => q.murals.length > 0)}
                 onSelect={onSelectIdx}
               />
             ))}
@@ -993,6 +1258,7 @@ export function MuralsTab({
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
+            onDoubleClick={handleDoubleClick}
             style={{ cursor: dragRef.current.kind !== 'none' ? 'grabbing' : undefined }}
           />
 
@@ -1024,11 +1290,35 @@ export function MuralsTab({
         </div>
 
         {/* ---- Right Sidebar: Mural alternatives ---- */}
-        <div className="w-[200px] border-l bg-white flex flex-col">
+        <div data-sidebar className="w-[200px] border-l bg-white flex flex-col">
+          {/* Quad tabs */}
+          {selectedWall && selectedWall.quads.length > 1 && (
+            <div className="flex gap-1 p-2 border-b border-slate-200">
+              {selectedWall.quads.map((q, qi) => (
+                <button
+                  key={q.id}
+                  onClick={() => { setActiveQuadIdx(qi); setActiveMuralIdx(0); }}
+                  className={cn(
+                    'flex-1 px-2 py-1 rounded text-xs font-medium transition-colors',
+                    qi === activeQuadIdx
+                      ? 'bg-indigo-500 text-white'
+                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                  )}
+                >
+                  Q{qi + 1}
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Header + load button */}
           <div className="p-3 border-b">
             <button
-              onClick={() => muralInputRef.current?.click()}
+              onClick={() => {
+                setSelectedPoolIds(new Set());
+                setPickerTab(muralPool.length > 0 ? 'library' : 'files');
+                setShowMuralPicker(true);
+              }}
               disabled={!hasQuad}
               className={cn(
                 'w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md transition-colors',
@@ -1046,13 +1336,243 @@ export function MuralsTab({
               multiple
               accept="image/*"
               className="hidden"
-              onChange={handleLoadMural}
+              onChange={(e) => {
+                handleLoadMural(e);
+                setShowMuralPicker(false);
+              }}
             />
+            <button
+              onClick={() => {
+                if (!selectedWall || !selectedWall.quads[activeQuadIdx] || muralPool.length === 0) return;
+                const quad = selectedWall.quads[activeQuadIdx];
+                if (quad.murals.length > 0) return; // only auto-fill empty quads
+                // Pick up to 5 random entries from muralPool
+                const shuffled = [...muralPool].sort(() => Math.random() - 0.5);
+                const picks = shuffled.slice(0, Math.min(5, shuffled.length));
+                const newMurals: MuralPlacement[] = picks.map(entry => ({
+                  id: genId(),
+                  muralPoolId: entry.id,
+                  file: entry.file,
+                  thumbUrl: entry.thumbUrl,
+                  scale: 1,
+                  offsetX: 0,
+                  offsetY: 0,
+                  rotation: 0,
+                  rotationLocked: true,
+                  opacity: 1,
+                  blendMode: 'source-over' as GlobalCompositeOperation,
+                  comment: '',
+                }));
+                const newWalls = [...walls];
+                const w = { ...newWalls[selectedIdx] };
+                const quads = [...w.quads];
+                const q = { ...quads[activeQuadIdx] };
+                q.murals = [...q.murals, ...newMurals];
+                quads[activeQuadIdx] = q;
+                w.quads = quads;
+                newWalls[selectedIdx] = w;
+                onWallsChange(newWalls, selectedIdx);
+                setActiveMuralIdx(0);
+              }}
+              disabled={!hasQuad || muralPool.length === 0 || (activeQuad?.murals.length ?? 0) > 0}
+              className={cn(
+                'w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors mt-1.5',
+                hasQuad && muralPool.length > 0 && (activeQuad?.murals.length ?? 0) === 0
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                  : 'bg-gray-100 text-gray-400 cursor-not-allowed',
+              )}
+            >
+              <Shuffle className="w-3.5 h-3.5" />
+              Quick Fill
+            </button>
           </div>
 
+          {/* Mural Picker Modal */}
+          {showMuralPicker && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 overflow-hidden"
+              onClick={() => setShowMuralPicker(false)}
+            >
+              <div
+                className="bg-white rounded-xl shadow-2xl w-[700px] max-w-[90vw] max-h-[85vh] flex flex-col"
+                onClick={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+              >
+                {/* Modal header */}
+                <div className="flex items-center justify-between px-4 py-3 border-b">
+                  <h3 className="text-sm font-semibold text-slate-700">Load Mural</h3>
+                  <button
+                    onClick={() => setShowMuralPicker(false)}
+                    className="p-1 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Tab buttons */}
+                <div className="flex border-b">
+                  <button
+                    onClick={() => setPickerTab('files')}
+                    className={cn(
+                      'flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors border-b-2',
+                      pickerTab === 'files'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-slate-400 hover:text-slate-600',
+                    )}
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    Browse Files
+                  </button>
+                  <button
+                    onClick={() => setPickerTab('library')}
+                    className={cn(
+                      'flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors border-b-2',
+                      pickerTab === 'library'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-slate-400 hover:text-slate-600',
+                    )}
+                  >
+                    <Grid3X3 className="w-3.5 h-3.5" />
+                    Library
+                    {muralPool.length > 0 && (
+                      <span className="ml-1 text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full">{muralPool.length}</span>
+                    )}
+                  </button>
+                </div>
+
+                {/* Tab content */}
+                <div className="flex-1 overflow-y-auto min-h-0 p-4">
+                  {pickerTab === 'files' && (
+                    <div className="flex flex-col items-center justify-center py-10 gap-3">
+                      <FolderOpen className="w-10 h-10 text-slate-300" />
+                      <p className="text-sm text-slate-500">Select image files from your computer</p>
+                      <button
+                        onClick={() => muralInputRef.current?.click()}
+                        className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors"
+                      >
+                        Choose Files
+                      </button>
+                    </div>
+                  )}
+
+                  {pickerTab === 'library' && (
+                    <>
+                      {muralPool.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-10 gap-2">
+                          <Grid3X3 className="w-10 h-10 text-slate-300" />
+                          <p className="text-sm text-slate-500">No murals in the library yet</p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-4 gap-2">
+                          {muralPool.map(entry => {
+                            const isSelected = selectedPoolIds.has(entry.id);
+                            const isAssigned = selectedWall?.quads[activeQuadIdx]?.murals.some(m => m.muralPoolId === entry.id);
+                            return (
+                              <button
+                                key={entry.id}
+                                onClick={() => {
+                                  if (isAssigned) return;
+                                  setSelectedPoolIds(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(entry.id)) next.delete(entry.id);
+                                    else next.add(entry.id);
+                                    return next;
+                                  });
+                                }}
+                                className={cn(
+                                  'relative w-full aspect-square rounded-lg overflow-hidden border-2 transition-all',
+                                  isAssigned
+                                    ? 'border-slate-200 opacity-40 cursor-not-allowed'
+                                    : isSelected
+                                      ? 'border-blue-500 ring-2 ring-blue-300'
+                                      : 'border-slate-200 hover:border-blue-300',
+                                )}
+                                title={isAssigned ? 'Already added to this quad' : isSelected ? 'Click to deselect' : 'Click to select'}
+                              >
+                                <img src={entry.thumbUrl} className="w-full h-full object-cover" alt="" draggable={false} />
+                                {isAssigned && (
+                                  <div className="absolute inset-0 flex items-center justify-center bg-white/60">
+                                    <span className="text-[9px] font-medium text-slate-500">Added</span>
+                                  </div>
+                                )}
+                                {isSelected && !isAssigned && (
+                                  <div className="absolute top-1 right-1 w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center">
+                                    <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  </div>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Footer with action buttons */}
+                {pickerTab === 'library' && (
+                  <div className="flex items-center justify-between px-4 py-3 border-t bg-slate-50 rounded-b-xl">
+                    <button
+                      onClick={() => setShowMuralPicker(false)}
+                      className="px-3 py-1.5 text-xs text-slate-500 hover:text-slate-700 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!selectedWall || !selectedWall.quads[activeQuadIdx] || selectedPoolIds.size === 0) return;
+                        const newMurals: MuralPlacement[] = [];
+                        for (const poolId of selectedPoolIds) {
+                          const entry = muralPool.find(e => e.id === poolId);
+                          if (!entry) continue;
+                          newMurals.push({
+                            id: genId(),
+                            muralPoolId: entry.id,
+                            file: entry.file,
+                            thumbUrl: entry.thumbUrl,
+                            scale: 1,
+                            offsetX: 0,
+                            offsetY: 0,
+                            rotation: 0,
+                            rotationLocked: true,
+                            opacity: 1,
+                            blendMode: 'source-over',
+                            comment: '',
+                          });
+                        }
+                        const newWalls = [...walls];
+                        const w = { ...newWalls[selectedIdx] };
+                        const quads = [...w.quads];
+                        const q = { ...quads[activeQuadIdx] };
+                        q.murals = [...q.murals, ...newMurals];
+                        quads[activeQuadIdx] = q;
+                        w.quads = quads;
+                        newWalls[selectedIdx] = w;
+                        onWallsChange(newWalls, selectedIdx);
+                        setShowMuralPicker(false);
+                        setSelectedPoolIds(new Set());
+                      }}
+                      disabled={selectedPoolIds.size === 0}
+                      className={cn(
+                        'px-4 py-1.5 text-xs font-medium rounded-md transition-colors',
+                        selectedPoolIds.size > 0
+                          ? 'bg-blue-600 text-white hover:bg-blue-700'
+                          : 'bg-slate-200 text-slate-400 cursor-not-allowed',
+                      )}
+                    >
+                      Add Selected ({selectedPoolIds.size})
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Mural alternatives list */}
-          <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {selectedWall?.murals.map((m, i) => (
+          <div className="flex-1 overflow-y-auto hide-scrollbar p-2 space-y-2">
+            {activeQuad?.murals.map((m, i) => (
               <MuralThumb
                 key={m.id}
                 mural={m}
@@ -1069,14 +1589,108 @@ export function MuralsTab({
             )}
           </div>
 
-          {/* Action buttons for selected mural */}
+          {/* Action buttons + controls for selected mural */}
           {activeMural && (
             <div className="border-t p-3 space-y-2">
-              <div className="flex gap-2">
+              {/* Quick actions row */}
+              <div className="flex gap-1">
+                <button
+                  onClick={handleAutoFit}
+                  className="flex-1 flex items-center justify-center gap-1 px-1 py-1.5 text-[10px] rounded-md hover:bg-gray-100 transition-colors text-gray-600 border border-gray-200"
+                  title="Fit mural inside quad (contain)"
+                >
+                  <Maximize className="w-3 h-3" />
+                  Fit
+                </button>
+                <button
+                  onClick={handleAutoFill}
+                  className="flex-1 flex items-center justify-center gap-1 px-1 py-1.5 text-[10px] rounded-md hover:bg-gray-100 transition-colors text-gray-600 border border-gray-200"
+                  title="Fill quad with mural (cover)"
+                >
+                  <Square className="w-3 h-3" />
+                  Fill
+                </button>
+                <button
+                  onClick={handleSnapCenter}
+                  className="flex-1 flex items-center justify-center gap-1 px-1 py-1.5 text-[10px] rounded-md hover:bg-gray-100 transition-colors text-gray-600 border border-gray-200"
+                  title="Snap to center (double-click wall to set)"
+                >
+                  <Crosshair className="w-3 h-3" />
+                  Center
+                </button>
+              </div>
+
+              {/* Clip mask */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-medium text-gray-500 uppercase">Clip Edges</label>
+                {([
+                  ['clipLeft', 'L'],
+                  ['clipRight', 'R'],
+                  ['clipTop', 'T'],
+                  ['clipBottom', 'B'],
+                ] as const).map(([field, label]) => (
+                  <div key={field} className="flex items-center gap-2">
+                    <span className="text-[9px] text-gray-500 w-3">{label}</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="0.45"
+                      step="0.01"
+                      value={(activeMural as any)[field] ?? 0}
+                      onChange={e => updateMural(selectedIdx, activeMuralIdx, { [field]: parseFloat(e.target.value) })}
+                      className="flex-1 h-1.5 accent-amber-500"
+                    />
+                    <span className="text-[10px] text-gray-400 tabular-nums w-8 text-right">
+                      {Math.round(((activeMural as any)[field] ?? 0) * 100)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Opacity */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-medium text-gray-500 uppercase">Opacity</label>
+                  <span className="text-[10px] text-gray-400 tabular-nums">{Math.round((activeMural.opacity ?? 1) * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={activeMural.opacity ?? 1}
+                  onChange={e => updateMural(selectedIdx, activeMuralIdx, { opacity: parseFloat(e.target.value) })}
+                  className="w-full h-1.5 accent-indigo-500"
+                />
+              </div>
+
+              {/* Blend mode */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-medium text-gray-500 uppercase">Blend</label>
+                <select
+                  value={activeMural.blendMode ?? 'source-over'}
+                  onChange={e => updateMural(selectedIdx, activeMuralIdx, { blendMode: e.target.value as GlobalCompositeOperation })}
+                  className="w-full text-xs px-2 py-1 rounded border border-gray-200 bg-white text-gray-700"
+                >
+                  <option value="source-over">Normal</option>
+                  <option value="multiply">Multiply</option>
+                  <option value="screen">Screen</option>
+                  <option value="overlay">Overlay</option>
+                  <option value="darken">Darken</option>
+                  <option value="lighten">Lighten</option>
+                  <option value="color-dodge">Color Dodge</option>
+                  <option value="color-burn">Color Burn</option>
+                  <option value="soft-light">Soft Light</option>
+                  <option value="hard-light">Hard Light</option>
+                </select>
+              </div>
+
+              {/* Buttons row */}
+              <div className="flex gap-1.5">
                 <button
                   onClick={() => updateMural(selectedIdx, activeMuralIdx, { liked: !activeMural.liked })}
                   className={cn(
-                    'flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded-md transition-colors border',
+                    'flex items-center justify-center px-2 py-1.5 text-xs rounded-md transition-colors border',
                     activeMural.liked
                       ? 'bg-red-50 text-red-500 border-red-200'
                       : 'hover:bg-gray-100 text-gray-700 border-gray-200',
@@ -1090,14 +1704,38 @@ export function MuralsTab({
                   className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded-md hover:bg-gray-100 transition-colors text-gray-700 border border-gray-200"
                 >
                   <Copy className="w-3.5 h-3.5" />
-                  Duplicate
                 </button>
                 <button
                   onClick={handleRemoveMural}
                   className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded-md hover:bg-red-50 hover:text-red-600 transition-colors text-gray-700 border border-gray-200"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  Remove
+                </button>
+              </div>
+
+              {/* Copy/Paste settings */}
+              <div className="flex gap-1.5">
+                <button
+                  onClick={handleCopySettings}
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded-md hover:bg-gray-100 transition-colors text-gray-600 border border-gray-200"
+                  title="Copy placement settings (Ctrl+Shift+C)"
+                >
+                  <ClipboardCopy className="w-3.5 h-3.5" />
+                  Copy
+                </button>
+                <button
+                  onClick={handlePasteSettings}
+                  disabled={!copiedSettings}
+                  className={cn(
+                    'flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded-md transition-colors border',
+                    copiedSettings
+                      ? 'hover:bg-gray-100 text-gray-600 border-gray-200'
+                      : 'text-gray-300 border-gray-100 cursor-not-allowed',
+                  )}
+                  title="Paste placement settings (Ctrl+Shift+V)"
+                >
+                  <ClipboardPaste className="w-3.5 h-3.5" />
+                  Paste
                 </button>
               </div>
             </div>
@@ -1116,6 +1754,12 @@ export function MuralsTab({
               <span className="text-gray-400 text-xs">
                 {muralCount} mural{muralCount !== 1 ? 's' : ''}
               </span>
+              {selectedWall?.quads.some(q => q.linkId) && (
+                <span className="flex items-center gap-1 text-amber-500 text-xs font-medium" title="Murals sync across linked quads">
+                  <Link className="w-3 h-3" />
+                  Linked
+                </span>
+              )}
             </>
           )}
         </div>

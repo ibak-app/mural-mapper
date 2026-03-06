@@ -2,10 +2,11 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
-import { ImagePlus, Crop, X, Loader2, Copy, RotateCcw } from 'lucide-react';
+import { ImagePlus, Crop, X, Loader2, Copy, RotateCcw, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   generateThumbsBatch,
@@ -15,13 +16,15 @@ import {
   generateThumb,
 } from '@/lib/image-cache';
 import { CropDialog } from '@/components/crop-dialog';
-import type { Wall } from '@/App';
+import type { Wall, MuralPoolEntry } from '@/App';
 
 interface GalleryTabProps {
   walls: Wall[];
-  onWallsChange: (walls: Wall[]) => void;
+  onWallsChange: (walls: Wall[], changedIdx?: number) => void;
   selectedIdx: number;
   onSelectIdx: (idx: number) => void;
+  muralPool: MuralPoolEntry[];
+  onMuralPoolChange: (pool: MuralPoolEntry[]) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -33,11 +36,9 @@ interface ThumbProps {
   index: number;
   selected: boolean;
   isDragOver: boolean;
+  linkColor?: string;
   onSelect: (i: number) => void;
-  onDragStart: (i: number) => void;
-  onDragOver: (e: React.DragEvent, i: number) => void;
-  onDrop: (i: number) => void;
-  onDragEnd: () => void;
+  onPointerDown: (i: number, e: React.PointerEvent) => void;
 }
 
 const Thumb = React.memo<ThumbProps>(function Thumb({
@@ -45,25 +46,19 @@ const Thumb = React.memo<ThumbProps>(function Thumb({
   index,
   selected,
   isDragOver,
+  linkColor,
   onSelect,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
+  onPointerDown,
 }) {
   return (
     <div
       className={cn(
-        'relative w-[80px] h-[60px] rounded-md overflow-hidden cursor-pointer border-2 shrink-0',
+        'relative w-[80px] h-[60px] rounded-md overflow-hidden cursor-pointer border-2 shrink-0 select-none',
         selected ? 'border-blue-500 ring-2 ring-blue-300' : 'border-transparent',
         isDragOver && 'border-t-4 border-t-blue-500',
       )}
-      draggable
       onClick={() => onSelect(index)}
-      onDragStart={() => onDragStart(index)}
-      onDragOver={(e) => onDragOver(e, index)}
-      onDrop={() => onDrop(index)}
-      onDragEnd={onDragEnd}
+      onPointerDown={(e) => onPointerDown(index, e)}
     >
       {wall.thumbUrl ? (
         <img
@@ -84,8 +79,17 @@ const Thumb = React.memo<ThumbProps>(function Thumb({
       </span>
 
       {/* green dot if quad is defined */}
-      {wall.quad && (
+      {wall.quads.length > 0 && (
         <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-green-400 border border-white" />
+      )}
+
+      {/* link group indicator */}
+      {linkColor && (
+        <span
+          className="absolute top-1 left-1 w-2.5 h-2.5 rounded-full border border-white"
+          style={{ backgroundColor: linkColor }}
+          title="Linked wall"
+        />
       )}
     </div>
   );
@@ -100,6 +104,8 @@ export function GalleryTab({
   onWallsChange,
   selectedIdx,
   onSelectIdx,
+  muralPool,
+  onMuralPoolChange,
 }: GalleryTabProps) {
   /* refs to avoid stale closures */
   const wallsRef = useRef(walls);
@@ -111,13 +117,38 @@ export function GalleryTab({
   const containerRef = useRef<HTMLDivElement>(null);
   const thumbListRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const muralFileInputRef = useRef<HTMLInputElement>(null);
 
   const [loading, setLoading] = useState(false);
   const [cropSrc, setCropSrc] = useState<string | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [dropZoneActive, setDropZoneActive] = useState(false);
+  const [previewMuralIdx, setPreviewMuralIdx] = useState<number | null>(null);
+  const [muralDragOverIdx, setMuralDragOverIdx] = useState<number | null>(null);
 
   const dragIdx = useRef<number | null>(null);
+  const muralDragIdx = useRef<number | null>(null);
+  const muralPoolRef = useRef(muralPool);
+  muralPoolRef.current = muralPool;
+  const previewMuralIdxRef = useRef(previewMuralIdx);
+  previewMuralIdxRef.current = previewMuralIdx;
+  const muralThumbListRef = useRef<HTMLDivElement>(null);
+
+  /* ---- link group colors ---- */
+  const LINK_COLORS = ['#f59e0b', '#3b82f6', '#10b981', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+  const linkColorMap = useMemo(() => {
+    const map = new Map<string, string>();
+    let colorIdx = 0;
+    for (const w of walls) {
+      for (const q of w.quads) {
+        if (q.linkId && !map.has(q.linkId)) {
+          map.set(q.linkId, LINK_COLORS[colorIdx % LINK_COLORS.length]);
+          colorIdx++;
+        }
+      }
+    }
+    return map;
+  }, [walls]);
 
   /* ---- canvas draw ------------------------------------------------ */
 
@@ -125,6 +156,23 @@ export function GalleryTab({
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
+
+    /* Mural preview mode */
+    if (previewMuralIdx !== null) {
+      const entry = muralPool[previewMuralIdx];
+      if (!entry) return;
+      setLoading(true);
+      try {
+        const bitmap = await getFullBitmap(entry.blob);
+        if (previewMuralIdxRef.current !== previewMuralIdx) return;
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+        drawFitted(canvas, bitmap);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
 
     const w = walls[selectedIdx];
     if (!w) {
@@ -149,7 +197,7 @@ export function GalleryTab({
     } finally {
       setLoading(false);
     }
-  }, [walls, selectedIdx]);
+  }, [walls, selectedIdx, previewMuralIdx, muralPool]);
 
   /* redraw on selection or crop change */
   useLayoutEffect(() => {
@@ -175,26 +223,41 @@ export function GalleryTab({
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-      let dir = 0;
-      if (e.key === 'ArrowUp') dir = -1;
-      if (e.key === 'ArrowDown') dir = 1;
-      if (dir === 0) return;
+      /* Escape clears mural preview */
+      if (e.key === 'Escape' && previewMuralIdxRef.current !== null) {
+        e.preventDefault();
+        setPreviewMuralIdx(null);
+        return;
+      }
 
+      let dir = 0;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') dir = -1;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') dir = 1;
+      if (dir === 0) return;
       e.preventDefault();
 
-      /* coalesce with rAF */
-      if (pending === null) {
-        pending = dir;
-        rafId = requestAnimationFrame(() => {
-          const cur = selectedRef.current;
-          const len = wallsRef.current.length;
-          if (len === 0) { pending = null; return; }
-          const next = Math.max(0, Math.min(len - 1, cur + pending!));
-          if (next !== cur) onSelectIdx(next);
-          pending = null;
-        });
+      if (previewMuralIdxRef.current !== null) {
+        // Navigate murals
+        const mLen = muralPoolRef.current.length;
+        if (mLen === 0) return;
+        const mCur = previewMuralIdxRef.current;
+        const mNext = Math.max(0, Math.min(mLen - 1, mCur + dir));
+        if (mNext !== mCur) setPreviewMuralIdx(mNext);
       } else {
-        pending += dir;
+        // Navigate walls
+        if (pending === null) {
+          pending = dir;
+          rafId = requestAnimationFrame(() => {
+            const cur = selectedRef.current;
+            const len = wallsRef.current.length;
+            if (len === 0) { pending = null; return; }
+            const next = Math.max(0, Math.min(len - 1, cur + pending!));
+            if (next !== cur) onSelectIdx(next);
+            pending = null;
+          });
+        } else {
+          pending += dir;
+        }
       }
     };
 
@@ -213,46 +276,73 @@ export function GalleryTab({
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [selectedIdx]);
 
-  /* ---- drag & drop reorder ---------------------------------------- */
+  /* auto-scroll selected mural thumb into view */
+  useEffect(() => {
+    if (previewMuralIdx === null) return;
+    const list = muralThumbListRef.current;
+    if (!list) return;
+    const el = list.children[previewMuralIdx] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [previewMuralIdx]);
 
-  const handleDragStart = useCallback((i: number) => {
+  /* ---- pointer-based drag reorder ---------------------------------- */
+
+  const pointerStartY = useRef<number>(0);
+  const pointerDragging = useRef(false);
+  const dragOverIdxRef = useRef<number | null>(null);
+
+  const handleThumbPointerDown = useCallback((i: number, e: React.PointerEvent) => {
     dragIdx.current = i;
-  }, []);
+    pointerStartY.current = e.clientY;
+    pointerDragging.current = false;
+    dragOverIdxRef.current = null;
 
-  const handleDragOver = useCallback((e: React.DragEvent, i: number) => {
-    e.preventDefault();
-    setDragOverIdx(i);
-  }, []);
-
-  const handleDragEnd = useCallback(() => {
-    dragIdx.current = null;
-    setDragOverIdx(null);
-  }, []);
-
-  const handleDrop = useCallback(
-    (dropIdx: number) => {
-      const from = dragIdx.current;
-      if (from === null || from === dropIdx) return;
-
-      const next = [...wallsRef.current];
-      const [moved] = next.splice(from, 1);
-      next.splice(dropIdx, 0, moved);
-      onWallsChange(next);
-
-      /* keep selection on the same wall */
-      if (selectedRef.current === from) {
-        onSelectIdx(dropIdx);
-      } else if (from < selectedRef.current && dropIdx >= selectedRef.current) {
-        onSelectIdx(selectedRef.current - 1);
-      } else if (from > selectedRef.current && dropIdx <= selectedRef.current) {
-        onSelectIdx(selectedRef.current + 1);
+    const onMove = (ev: PointerEvent) => {
+      if (!pointerDragging.current && Math.abs(ev.clientY - pointerStartY.current) > 5) {
+        pointerDragging.current = true;
       }
+      if (!pointerDragging.current) return;
+      // Find which thumb the pointer is over
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!el) return;
+      const thumbEl = el.closest('[data-wall-idx]') as HTMLElement | null;
+      if (thumbEl) {
+        const idx = parseInt(thumbEl.dataset.wallIdx!, 10);
+        if (!isNaN(idx)) {
+          dragOverIdxRef.current = idx;
+          setDragOverIdx(idx);
+        }
+      }
+    };
 
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const from = dragIdx.current;
+      const to = dragOverIdxRef.current;
+      if (pointerDragging.current && from !== null && to !== null && from !== to) {
+        const next = [...wallsRef.current];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        onWallsChange(next);
+
+        if (selectedRef.current === from) {
+          onSelectIdx(to);
+        } else if (from < selectedRef.current && to >= selectedRef.current) {
+          onSelectIdx(selectedRef.current - 1);
+        } else if (from > selectedRef.current && to <= selectedRef.current) {
+          onSelectIdx(selectedRef.current + 1);
+        }
+      }
       dragIdx.current = null;
+      dragOverIdxRef.current = null;
       setDragOverIdx(null);
-    },
-    [onWallsChange, onSelectIdx],
-  );
+      pointerDragging.current = false;
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [onWallsChange, onSelectIdx]);
 
   /* ---- add images (shared logic) ---------------------------------- */
 
@@ -267,7 +357,7 @@ export function GalleryTab({
         file: f,
         thumbUrl: '',
         blob: f,
-        murals: [],
+        quads: [],
       }));
 
       const merged = [...wallsRef.current, ...newWalls];
@@ -346,7 +436,7 @@ export function GalleryTab({
         blob,
         thumbUrl,
         crop: undefined,
-        quad: undefined,
+        quads: [],
       };
       onWallsChange(cur);
 
@@ -368,8 +458,8 @@ export function GalleryTab({
     const cur = [...wallsRef.current];
     const w = cur[idx];
     if (!w) return;
-    // Reset blob back to original file, clear crop and quad
-    cur[idx] = { ...w, blob: w.file, crop: undefined, quad: undefined };
+    // Reset blob back to original file, clear crop and quads
+    cur[idx] = { ...w, blob: w.file, crop: undefined, quads: [] };
     // Regenerate thumb from original file
     generateThumb(w.file).then(thumbUrl => {
       const updated = [...wallsRef.current];
@@ -390,7 +480,7 @@ export function GalleryTab({
     const dup: Wall = {
       ...w,
       id: crypto.randomUUID(),
-      murals: [],
+      quads: [],
     };
     const cur = [...wallsRef.current];
     cur.splice(idx + 1, 0, dup);
@@ -417,6 +507,100 @@ export function GalleryTab({
     }
   }, [onWallsChange, onSelectIdx]);
 
+  /* ---- wall select (clears mural preview) ------------------------- */
+
+  const handleWallSelect = useCallback((i: number) => {
+    setPreviewMuralIdx(null);
+    onSelectIdx(i);
+  }, [onSelectIdx]);
+
+  /* ---- mural drag-to-reorder -------------------------------------- */
+
+  const muralDragOverIdxRef = useRef<number | null>(null);
+
+  const handleMuralPointerDown = useCallback((i: number, e: React.PointerEvent) => {
+    muralDragIdx.current = i;
+    const startY = e.clientY;
+    let dragging = false;
+    muralDragOverIdxRef.current = null;
+
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging && Math.abs(ev.clientY - startY) > 5) dragging = true;
+      if (!dragging) return;
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!el) return;
+      const thumbEl = el.closest('[data-mural-idx]') as HTMLElement | null;
+      if (thumbEl) {
+        const idx = parseInt(thumbEl.dataset.muralIdx!, 10);
+        if (!isNaN(idx)) {
+          muralDragOverIdxRef.current = idx;
+          setMuralDragOverIdx(idx);
+        }
+      }
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const from = muralDragIdx.current;
+      const to = muralDragOverIdxRef.current;
+      if (dragging && from !== null && to !== null && from !== to) {
+        const next = [...muralPoolRef.current];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        onMuralPoolChange(next);
+
+        if (previewMuralIdxRef.current !== null) {
+          if (previewMuralIdxRef.current === from) {
+            setPreviewMuralIdx(to);
+          } else if (from < previewMuralIdxRef.current && to >= previewMuralIdxRef.current) {
+            setPreviewMuralIdx(previewMuralIdxRef.current - 1);
+          } else if (from > previewMuralIdxRef.current && to <= previewMuralIdxRef.current) {
+            setPreviewMuralIdx(previewMuralIdxRef.current + 1);
+          }
+        }
+      }
+      muralDragIdx.current = null;
+      muralDragOverIdxRef.current = null;
+      setMuralDragOverIdx(null);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [onMuralPoolChange]);
+
+  /* ---- mural pool handlers ---------------------------------------- */
+
+  const handleAddMurals = useCallback(async (files: File[]) => {
+    const newEntries: MuralPoolEntry[] = [];
+    for (const f of files) {
+      const thumbUrl = await generateThumb(f);
+      newEntries.push({
+        id: crypto.randomUUID().slice(0, 8),
+        file: f,
+        blob: f,
+        thumbUrl,
+      });
+    }
+    onMuralPoolChange([...muralPool, ...newEntries]);
+  }, [muralPool, onMuralPoolChange]);
+
+  const handleMuralFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      handleAddMurals(Array.from(files));
+      e.target.value = '';
+    },
+    [handleAddMurals],
+  );
+
+  const handleRemoveMural = useCallback((poolId: string) => {
+    const inUse = walls.some(w => w.quads.some(q => q.murals.some(m => m.muralPoolId === poolId)));
+    if (inUse) return;
+    onMuralPoolChange(muralPool.filter(p => p.id !== poolId));
+  }, [walls, muralPool, onMuralPoolChange]);
+
   /* ---- render ----------------------------------------------------- */
 
   const selectedWall = walls[selectedIdx];
@@ -428,21 +612,20 @@ export function GalleryTab({
         <div className="w-[100px] border-r bg-gray-50 flex flex-col">
           <div
             ref={thumbListRef}
-            className="flex-1 overflow-y-auto p-2 space-y-2 flex flex-col items-center"
+            className="flex-1 overflow-y-auto hide-scrollbar p-2 space-y-2 flex flex-col items-center"
           >
             {walls.map((w, i) => (
-              <Thumb
-                key={w.id}
-                wall={w}
-                index={i}
-                selected={i === selectedIdx}
-                isDragOver={dragOverIdx === i}
-                onSelect={onSelectIdx}
-                onDragStart={handleDragStart}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
-                onDragEnd={handleDragEnd}
-              />
+              <div key={w.id} data-wall-idx={i}>
+                <Thumb
+                  wall={w}
+                  index={i}
+                  selected={i === selectedIdx}
+                  isDragOver={dragOverIdx === i}
+                  linkColor={w.quads.some(q => q.linkId) ? linkColorMap.get(w.quads.find(q => q.linkId)?.linkId ?? '') : undefined}
+                  onSelect={handleWallSelect}
+                  onPointerDown={handleThumbPointerDown}
+                />
+              </div>
             ))}
           </div>
 
@@ -475,11 +658,7 @@ export function GalleryTab({
         >
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
-          {loading && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <Loader2 className="w-8 h-8 animate-spin text-white/70" />
-            </div>
-          )}
+          {/* loading spinner removed — preloading handles it seamlessly */}
 
           {/* Drop zone overlay */}
           {dropZoneActive && (
@@ -503,6 +682,88 @@ export function GalleryTab({
               </button>
             </div>
           )}
+        </div>
+
+        {/* ---- Mural Library Sidebar ---- */}
+        <div className="w-[100px] border-l bg-gray-50 flex flex-col shrink-0">
+          <div
+            ref={muralThumbListRef}
+            className="flex-1 overflow-y-auto hide-scrollbar p-2 space-y-2 flex flex-col items-center"
+          >
+            {muralPool.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-2">
+                <ImagePlus className="w-8 h-8" />
+                <p className="text-[10px] text-center">Add murals</p>
+              </div>
+            ) : (
+              muralPool.map((entry, i) => {
+                const inUse = walls.some(w => w.quads.some(q => q.murals.some(m => m.muralPoolId === entry.id)));
+                return (
+                  <div
+                    key={entry.id}
+                    data-mural-idx={i}
+                    className={cn(
+                      'group relative w-[80px] h-[60px] rounded-md overflow-hidden cursor-pointer border-2 shrink-0 select-none',
+                      previewMuralIdx === i ? 'border-blue-500 ring-2 ring-blue-300' : 'border-transparent',
+                      muralDragOverIdx === i && 'border-t-4 border-t-blue-500',
+                    )}
+                    onClick={() => setPreviewMuralIdx(i)}
+                    onPointerDown={(e) => handleMuralPointerDown(i, e)}
+                  >
+                    <img
+                      src={entry.thumbUrl}
+                      alt={entry.file.name}
+                      className="w-full h-full object-cover"
+                      draggable={false}
+                    />
+                    {/* number badge */}
+                    <span className="absolute bottom-0.5 left-0.5 text-[10px] font-bold bg-black/60 text-white rounded px-1 leading-tight">
+                      {i + 1}
+                    </span>
+                    {/* Remove button on hover (only if not in use) */}
+                    {!inUse && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleRemoveMural(entry.id); }}
+                        className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600"
+                        title="Remove from library"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                    {/* In-use indicator */}
+                    {inUse && (
+                      <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-green-400 border border-white" title="In use" />
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Add button */}
+          <button
+            onClick={() => muralFileInputRef.current?.click()}
+            className="h-10 flex items-center justify-center gap-1 text-sm text-gray-500 hover:text-blue-600 hover:bg-blue-50 border-t transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add</span>
+          </button>
+
+          <input
+            ref={muralFileInputRef}
+            type="file"
+            multiple
+            accept="image/*"
+            className="hidden"
+            onChange={handleMuralFileChange}
+          />
+
+          {/* Footer count */}
+          <div className="px-1 py-1.5 border-t text-center">
+            <span className="text-[11px] text-slate-400">
+              {muralPool.length} mural{muralPool.length !== 1 ? 's' : ''}
+            </span>
+          </div>
         </div>
       </div>
 

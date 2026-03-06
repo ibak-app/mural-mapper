@@ -1,21 +1,60 @@
 // Simple IndexedDB persistence for projects
 
 const DB_NAME = 'mural-mapper';
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 const STORE = 'projects';
 
 interface Corner { x: number; y: number }
 
+export interface MuralEntry {
+  id: string;
+  muralPoolId: string;
+  blob: Blob;
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  rotation: number;
+  rotationLocked: boolean;
+  opacity: number;
+  blendMode: string;
+  clipLeft: number;
+  clipRight: number;
+  clipTop: number;
+  clipBottom: number;
+  comment: string;
+  liked: boolean;
+  // OLD fields kept for migration
+  clipMode?: string;
+  clipInset?: number;
+}
+
+export interface QuadEntry {
+  id: string;
+  corners: [Corner, Corner, Corner, Corner];
+  label?: string;
+  linkId?: string;
+  murals: MuralEntry[];
+}
+
+export interface MuralPoolDbEntry {
+  id: string;
+  blob: Blob;
+}
+
 export interface WallEntry {
   id: string;
   blob: Blob;
+  quads: QuadEntry[];
+  // OLD fields kept for migration
   corners?: [Corner, Corner, Corner, Corner];
+  murals?: MuralEntry[];
+  linkGroup?: string;
 }
 
 export interface ProjectData {
   name: string;
   walls: WallEntry[];
-  artBlob?: Blob;
+  muralPool?: MuralPoolDbEntry[];
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -70,20 +109,4 @@ export async function deleteProject(name: string): Promise<void> {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
-}
-
-// Helper: create HTMLImageElement from Blob
-export function blobToImage(blob: Blob): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = url;
-  });
-}
-
-// Helper: file or blob to Blob (for uniformity)
-export function fileToBlob(file: File): Blob {
-  return file;
 }
