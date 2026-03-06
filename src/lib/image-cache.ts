@@ -3,7 +3,8 @@
 // Full bitmaps use LRU eviction to avoid GPU memory exhaustion on WebKit
 
 const THUMB_SIZE = 150;
-const MAX_CACHED_BITMAPS = 15; // ~15 large images before evicting oldest
+const MAX_CACHED_BITMAPS = 10; // keep low to avoid WebKit GPU memory limits
+const DECODE_TIMEOUT_MS = 8000; // abort if image decode takes too long
 const bitmapCache = new Map<string, ImageBitmap>(); // insertion order = LRU order
 const thumbCache = new Map<string, string>();
 const fileKeys = new WeakMap<File | Blob, string>();
@@ -39,7 +40,7 @@ export async function generateThumb(file: File | Blob): Promise<string> {
   const cached = thumbCache.get(key);
   if (cached) return cached;
 
-  const bitmap = await createImageBitmap(file, {
+  const bitmap = await decodeWithTimeout(file, {
     resizeWidth: THUMB_SIZE,
     resizeHeight: THUMB_SIZE,
     resizeQuality: 'low',
@@ -74,6 +75,17 @@ export async function generateThumbsBatch(
   }
 }
 
+// Decode with timeout to prevent hanging
+function decodeWithTimeout(file: File | Blob, opts?: ImageBitmapOptions): Promise<ImageBitmap> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Image decode timeout')), DECODE_TIMEOUT_MS);
+    createImageBitmap(file, opts as any).then(
+      (bmp) => { clearTimeout(timer); resolve(bmp); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 // Get full-size ImageBitmap — decoded off main thread, LRU cached
 export async function getFullBitmap(file: File | Blob): Promise<ImageBitmap> {
   const key = getKey(file);
@@ -85,9 +97,10 @@ export async function getFullBitmap(file: File | Blob): Promise<ImageBitmap> {
     return cached;
   }
 
-  const bitmap = await createImageBitmap(file);
-  bitmapCache.set(key, bitmap);
+  // Evict BEFORE decoding to free GPU memory first
   enforceCacheLimit();
+  const bitmap = await decodeWithTimeout(file);
+  bitmapCache.set(key, bitmap);
   return bitmap;
 }
 
@@ -176,4 +189,12 @@ export function evict(file: File | Blob) {
   if (bitmap) { bitmap.close(); bitmapCache.delete(key); }
   const url = thumbCache.get(key);
   if (url) { URL.revokeObjectURL(url); thumbCache.delete(key); }
+}
+
+// Clear ALL caches — call when switching projects
+export function clearAll() {
+  for (const bmp of bitmapCache.values()) bmp.close();
+  bitmapCache.clear();
+  for (const url of thumbCache.values()) URL.revokeObjectURL(url);
+  thumbCache.clear();
 }

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { FolderOpen, Plus, Trash2, Check, Loader2, Download, Upload, Undo2, Redo2 } from 'lucide-react';
 import { saveProject, loadProject, listProjects, deleteProject, type ProjectData, type MuralEntry } from '@/lib/db';
-import { generateThumb, preloadAll } from '@/lib/image-cache';
+import { generateThumb, preloadAll, clearAll as clearImageCache } from '@/lib/image-cache';
 import { exportProject, importProject } from '@/lib/project-file';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { writeFile, readFile } from '@tauri-apps/plugin-fs';
@@ -504,6 +504,7 @@ export default function App() {
 
   /* ---- back to project list ---- */
   const handleBackToProjects = useCallback(() => {
+    clearImageCache(); // free all GPU memory before switching projects
     setMode('select');
     setWalls([]);
     setMuralPool([]);

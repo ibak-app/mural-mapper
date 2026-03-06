@@ -683,29 +683,37 @@ export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
       let pageIdx = 0;
 
       for (const { entry, wi, mural, mi, corners } of items) {
-        // Composite page (wall + warped mural) — skip in murals-only mode
-        if (mode !== 'murals-only') {
-          setExportProgress(`Rendering page ${pageIdx + 1}/${totalPages}...`);
-          const canvas = await renderComposite(entry.wall, mural, corners);
-          const imgData = canvas.toDataURL('image/jpeg', 0.92);
-          const label = `Wall ${wi + 1} — Alternative ${mi + 1}${mural.comment ? ` — ${mural.comment}` : ''}`;
-          addImagePage(pdf, imgData, canvas.width, canvas.height, pageIdx, label, mural.liked);
-          pageIdx++;
+        try {
+          // Composite page (wall + warped mural) — skip in murals-only mode
+          if (mode !== 'murals-only') {
+            setExportProgress(`Rendering page ${pageIdx + 1}/${totalPages}...`);
+            const canvas = await renderComposite(entry.wall, mural, corners);
+            const imgData = canvas.toDataURL('image/jpeg', 0.92);
+            const label = `Wall ${wi + 1} — Alternative ${mi + 1}${mural.comment ? ` — ${mural.comment}` : ''}`;
+            addImagePage(pdf, imgData, canvas.width, canvas.height, pageIdx, label, mural.liked);
+            pageIdx++;
+          }
+
+          // Original mural source page — for liked items, or always in murals-only mode
+          if (mural.liked || mode === 'murals-only') {
+            setExportProgress(`Rendering page ${pageIdx + 1}/${totalPages}...`);
+            const muralBitmap = await getFullBitmap(mural.file);
+            const muralCanvas = document.createElement('canvas');
+            muralCanvas.width = muralBitmap.width;
+            muralCanvas.height = muralBitmap.height;
+            const mCtx = muralCanvas.getContext('2d')!;
+            mCtx.drawImage(muralBitmap, 0, 0);
+            const muralImgData = muralCanvas.toDataURL('image/jpeg', 0.92);
+            addImagePage(pdf, muralImgData, muralBitmap.width, muralBitmap.height, pageIdx, `Original Mural — ${mural.comment || `Alt ${mi + 1}`}`, mural.liked);
+            pageIdx++;
+          }
+        } catch (err) {
+          console.warn(`Failed to render wall ${wi + 1}, alt ${mi + 1}:`, err);
+          pageIdx++; // skip the page but keep going
         }
 
-        // Original mural source page — for liked items, or always in murals-only mode
-        if (mural.liked || mode === 'murals-only') {
-          setExportProgress(`Rendering page ${pageIdx + 1}/${totalPages}...`);
-          const muralBitmap = await getFullBitmap(mural.file);
-          const muralCanvas = document.createElement('canvas');
-          muralCanvas.width = muralBitmap.width;
-          muralCanvas.height = muralBitmap.height;
-          const mCtx = muralCanvas.getContext('2d')!;
-          mCtx.drawImage(muralBitmap, 0, 0);
-          const muralImgData = muralCanvas.toDataURL('image/jpeg', 0.92);
-          addImagePage(pdf, muralImgData, muralBitmap.width, muralBitmap.height, pageIdx, `Original Mural — ${mural.comment || `Alt ${mi + 1}`}`, mural.liked);
-          pageIdx++;
-        }
+        // Yield to UI between pages to prevent freezing
+        await new Promise(r => setTimeout(r, 0));
       }
 
       setExportProgress('Saving PDF...');
