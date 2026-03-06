@@ -331,6 +331,8 @@ interface MuralThumbProps {
   index: number;
   selected: boolean;
   onSelect: (i: number) => void;
+  onRemove: (i: number) => void;
+  onPointerDown?: (i: number, e: React.PointerEvent) => void;
 }
 
 const MuralThumb = React.memo<MuralThumbProps>(function MuralThumb({
@@ -338,14 +340,17 @@ const MuralThumb = React.memo<MuralThumbProps>(function MuralThumb({
   index,
   selected,
   onSelect,
+  onRemove,
+  onPointerDown,
 }) {
   return (
     <div
       className={cn(
-        'relative w-full aspect-[4/3] rounded-md overflow-hidden cursor-pointer border-2 transition-all',
+        'group relative w-full aspect-[4/3] rounded-md overflow-hidden cursor-pointer border-2 transition-all select-none',
         selected ? 'border-blue-500 ring-2 ring-blue-300' : 'border-gray-200 hover:border-gray-400',
       )}
       onClick={(e) => { e.stopPropagation(); onSelect(index); }}
+      onPointerDown={onPointerDown ? (e) => onPointerDown(index, e) : undefined}
     >
       {mural.thumbUrl ? (
         <img
@@ -359,8 +364,16 @@ const MuralThumb = React.memo<MuralThumbProps>(function MuralThumb({
           <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
         </div>
       )}
+      {/* Remove button */}
+      <button
+        className="absolute top-0.5 right-0.5 w-5 h-5 flex items-center justify-center rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 z-10"
+        onClick={(e) => { e.stopPropagation(); onRemove(index); }}
+        title="Remove mural"
+      >
+        <X className="w-3 h-3" />
+      </button>
       {mural.liked && (
-        <span className="absolute top-1 right-1 text-red-500">
+        <span className="absolute top-1 right-7 text-red-500">
           <Heart className="w-3 h-3 fill-current" />
         </span>
       )}
@@ -420,6 +433,11 @@ export function MuralsTab({
   const [selectedPoolIds, setSelectedPoolIds] = useState<Set<string>>(new Set());
   const [pickerTab, setPickerTab] = useState<'files' | 'library'>('library');
   const rafRef = useRef<number | null>(null);
+
+  // Mural thumb drag-to-reorder state
+  const [muralDragOverIdx, setMuralDragOverIdx] = useState<number | null>(null);
+  const muralDragFromIdx = useRef<number | null>(null);
+  const muralDragOverIdxRef = useRef<number | null>(null);
 
   // Drag state
   const dragRef = useRef<DragMode>({ kind: 'none' });
@@ -1107,6 +1125,58 @@ export function MuralsTab({
     setActiveMuralIdx((prev) => Math.min(prev, Math.max(0, murals.length - 1)));
   }, [onWallsChange, activeMuralIdx]);
 
+  /* ---- mural thumb drag-to-reorder -------------------------------- */
+
+  const handleMuralThumbPointerDown = useCallback((i: number, e: React.PointerEvent) => {
+    muralDragFromIdx.current = i;
+    const startY = e.clientY;
+    let dragging = false;
+    muralDragOverIdxRef.current = null;
+
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging && Math.abs(ev.clientY - startY) > 5) dragging = true;
+      if (!dragging) return;
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!el) return;
+      const thumbEl = el.closest('[data-mural-alt-idx]') as HTMLElement | null;
+      if (thumbEl) {
+        const idx = parseInt(thumbEl.dataset.muralAltIdx!, 10);
+        if (!isNaN(idx)) {
+          muralDragOverIdxRef.current = idx;
+          setMuralDragOverIdx(idx);
+        }
+      }
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const from = muralDragFromIdx.current;
+      const to = muralDragOverIdxRef.current;
+      if (dragging && from !== null && to !== null && from !== to) {
+        const newWalls = [...walls];
+        const w = { ...newWalls[selectedIdx] };
+        const quads = [...w.quads];
+        const q = { ...quads[activeQuadIdx] };
+        const murals = [...q.murals];
+        const [moved] = murals.splice(from, 1);
+        murals.splice(to, 0, moved);
+        q.murals = murals;
+        quads[activeQuadIdx] = q;
+        w.quads = quads;
+        newWalls[selectedIdx] = w;
+        onWallsChange(newWalls, selectedIdx);
+        setActiveMuralIdx(to);
+      }
+      muralDragFromIdx.current = null;
+      muralDragOverIdxRef.current = null;
+      setMuralDragOverIdx(null);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [walls, selectedIdx, activeQuadIdx, onWallsChange]);
+
   /* ---- auto-fit / auto-fill --------------------------------------- */
 
   const handleAutoFit = useCallback(() => {
@@ -1573,13 +1643,33 @@ export function MuralsTab({
           {/* Mural alternatives list */}
           <div className="flex-1 overflow-y-auto hide-scrollbar p-2 space-y-2">
             {activeQuad?.murals.map((m, i) => (
-              <MuralThumb
+              <div
                 key={m.id}
-                mural={m}
-                index={i}
-                selected={i === activeMuralIdx}
-                onSelect={setActiveMuralIdx}
-              />
+                data-mural-alt-idx={i}
+                className={cn(
+                  muralDragOverIdx === i && muralDragFromIdx.current !== i && 'border-t-2 border-blue-500',
+                )}
+              >
+                <MuralThumb
+                  mural={m}
+                  index={i}
+                  selected={i === activeMuralIdx}
+                  onSelect={setActiveMuralIdx}
+                  onRemove={(idx) => {
+                    const newWalls = [...walls];
+                    const w = { ...newWalls[selectedIdx] };
+                    const quads = [...w.quads];
+                    const q = { ...quads[activeQuadIdx] };
+                    q.murals = q.murals.filter((_, mi) => mi !== idx);
+                    quads[activeQuadIdx] = q;
+                    w.quads = quads;
+                    newWalls[selectedIdx] = w;
+                    onWallsChange(newWalls, selectedIdx);
+                    if (activeMuralIdx >= q.murals.length) setActiveMuralIdx(Math.max(0, q.murals.length - 1));
+                  }}
+                  onPointerDown={handleMuralThumbPointerDown}
+                />
+              </div>
             ))}
 
             {muralCount === 0 && hasQuad && (

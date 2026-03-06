@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { FolderOpen, Plus, Trash2, Check, Loader2, Download, Upload } from 'lucide-react';
+import { FolderOpen, Plus, Trash2, Check, Loader2, Download, Upload, Undo2, Redo2 } from 'lucide-react';
 import { saveProject, loadProject, listProjects, deleteProject, type ProjectData, type MuralEntry } from '@/lib/db';
 import { generateThumb, preloadAll } from '@/lib/image-cache';
 import { exportProject, importProject } from '@/lib/project-file';
@@ -247,6 +247,8 @@ export default function App() {
   const [walls, setWalls] = useState<Wall[]>([]);
   const [muralPool, setMuralPool] = useState<MuralPoolEntry[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [undoStack, setUndoStack] = useState<Wall[][]>([]);
+  const [redoStack, setRedoStack] = useState<Wall[][]>([]);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const savedTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -505,6 +507,8 @@ export default function App() {
     setMode('select');
     setWalls([]);
     setMuralPool([]);
+    setUndoStack([]);
+    setRedoStack([]);
     setProjectName('');
     setSelectedIdx(0);
     setActiveTab('gallery');
@@ -562,8 +566,52 @@ export default function App() {
 
   /* ---- walls change handler (for child tabs) ---- */
   const handleWallsChange = useCallback((newWalls: Wall[], changedIdx?: number) => {
+    setUndoStack(prev => {
+      const next = [...prev, walls];
+      if (next.length > 50) next.shift();
+      return next;
+    });
+    setRedoStack([]);
     setWalls(syncLinkedMurals(newWalls, changedIdx));
-  }, [syncLinkedMurals]);
+  }, [syncLinkedMurals, walls]);
+
+  /* ---- undo / redo ---- */
+  const handleUndo = useCallback(() => {
+    if (undoStack.length === 0) return;
+    const prev = undoStack[undoStack.length - 1];
+    setUndoStack(s => s.slice(0, -1));
+    setRedoStack(s => [...s, walls]);
+    setWalls(prev);
+  }, [undoStack, walls]);
+
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack(s => s.slice(0, -1));
+    setUndoStack(s => [...s, walls]);
+    setWalls(next);
+  }, [redoStack, walls]);
+
+  /* ---- global keyboard shortcuts for undo/redo ---- */
+  useEffect(() => {
+    if (mode !== 'workspace') return;
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        ((e.key === 'z' && e.shiftKey) || e.key === 'y')
+      ) {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [mode, handleUndo, handleRedo]);
 
   /* ---- project file export ---- */
   const handleExportProject = useCallback(async () => {
@@ -715,6 +763,25 @@ export default function App() {
             >
               <Download className="w-3.5 h-3.5" />
               Export
+            </button>
+          </div>
+          {/* Undo / Redo */}
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={handleUndo}
+              disabled={undoStack.length === 0}
+              className="p-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="Undo (Ctrl+Z)"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={handleRedo}
+              disabled={redoStack.length === 0}
+              className="p-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="Redo (Ctrl+Shift+Z)"
+            >
+              <Redo2 className="w-3.5 h-3.5" />
             </button>
           </div>
           {/* Save status */}

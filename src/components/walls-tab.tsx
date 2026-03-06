@@ -9,7 +9,7 @@ import {
 } from 'react';
 import { getFullBitmap } from '@/lib/image-cache';
 import { cn } from '@/lib/utils';
-import { Grid3X3, Crosshair, RotateCcw, RectangleHorizontal, ClipboardCopy, ClipboardPaste, Link, Unlink, Plus, Trash2 } from 'lucide-react';
+import { Grid3X3, Crosshair, RotateCcw, RotateCw, RectangleHorizontal, ClipboardCopy, ClipboardPaste, Link, Unlink, Plus, Trash2 } from 'lucide-react';
 import type { Wall, Corner, QuadSurface } from '@/App';
 
 interface WallsTabProps {
@@ -654,8 +654,8 @@ export function WallsTab({
       if (placingCornerIdx !== null && bitmap) {
         const imgPos = screenToImage(pos.x, pos.y);
         if (!imgPos) return;
-        const cx = Math.max(0, Math.min(1, imgPos.x));
-        const cy = Math.max(0, Math.min(1, imgPos.y));
+        const cx = imgPos.x;
+        const cy = imgPos.y;
         const newCorners = [...partialCorners, { x: cx, y: cy }];
 
         if (newCorners.length >= 4) {
@@ -707,11 +707,8 @@ export function WallsTab({
           const pos = getCanvasCoords(e);
           const imgPos = screenToImage(pos.x, pos.y);
           if (!imgPos) return;
-          // Clamp to 0-1
-          const cx = Math.max(0, Math.min(1, imgPos.x));
-          const cy = Math.max(0, Math.min(1, imgPos.y));
           const newQuad = [...quad] as [Corner, Corner, Corner, Corner];
-          newQuad[draggingCorner] = { x: cx, y: cy };
+          newQuad[draggingCorner] = { x: imgPos.x, y: imgPos.y };
           const newWalls = walls.map((w, i) =>
             i === selectedIdx ? wallWithQuadCorners(w, newQuad) : w,
           );
@@ -734,8 +731,8 @@ export function WallsTab({
           const [a, b] = edges[draggingEdge];
           const newQuad = [...start.quad] as [Corner, Corner, Corner, Corner];
           // Move both corners of the edge
-          newQuad[a] = { x: Math.max(0, Math.min(1, start.quad[a].x + deltaX)), y: Math.max(0, Math.min(1, start.quad[a].y + deltaY)) };
-          newQuad[b] = { x: Math.max(0, Math.min(1, start.quad[b].x + deltaX)), y: Math.max(0, Math.min(1, start.quad[b].y + deltaY)) };
+          newQuad[a] = { x: start.quad[a].x + deltaX, y: start.quad[a].y + deltaY };
+          newQuad[b] = { x: start.quad[b].x + deltaX, y: start.quad[b].y + deltaY };
           const newWalls = walls.map((w, i) =>
             i === selectedIdx ? wallWithQuadCorners(w, newQuad) : w,
           );
@@ -870,6 +867,17 @@ export function WallsTab({
     onWallsChange(newWalls);
   }, [quad, walls, selectedIdx, onWallsChange]);
 
+  // Rotate quad orientation: cycles corner order [TL,TR,BR,BL] → [BL,TL,TR,BR]
+  // This changes which corner is "top-left" for mural mapping without moving the corners
+  const handleRotateOrientation = useCallback(() => {
+    if (!quad) return;
+    const rotated: [Corner, Corner, Corner, Corner] = [quad[3], quad[0], quad[1], quad[2]];
+    const newWalls = walls.map((w, i) =>
+      i === selectedIdx ? wallWithQuadCorners(w, rotated) : w,
+    );
+    onWallsChange(newWalls);
+  }, [quad, walls, selectedIdx, onWallsChange]);
+
   const handleReset = useCallback(() => {
     const newWalls = walls.map((w, i) =>
       i === selectedIdx ? wallWithQuadCorners(w, undefined) : w,
@@ -930,6 +938,8 @@ export function WallsTab({
         if (quad) setShowGuides(v => !v);
       } else if (e.key === 'm' || e.key === 'M') {
         setShowLoupe(v => !v);
+      } else if (e.key === 'q' || e.key === 'Q') {
+        if (quad) handleRotateOrientation();
       } else if (e.key === 's' || e.key === 'S') {
         if (quad) handleStraighten();
       } else if (e.key === 'r' || e.key === 'R') {
@@ -946,7 +956,7 @@ export function WallsTab({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [walls.length, selectedIdx, onSelectIdx, quad, copiedQuad, wall, handleStraighten, handleReset, handleAddQuad, handleCopyQuad, handlePasteQuad, handleDeleteQuad]);
+  }, [walls.length, selectedIdx, onSelectIdx, quad, copiedQuad, wall, handleStraighten, handleReset, handleAddQuad, handleCopyQuad, handlePasteQuad, handleDeleteQuad, handleRotateOrientation]);
 
   /* ---------------------------------------------------------------- */
   /*  Sidebar thumbs memoized list                                     */
@@ -1256,6 +1266,18 @@ export function WallsTab({
               title="Straighten to rectangle (S)"
             >
               <RectangleHorizontal className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={handleRotateOrientation}
+              disabled={!quad}
+              className={cn(
+                'p-2 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors',
+                !quad && 'opacity-40 cursor-not-allowed',
+              )}
+              title="Rotate quad orientation (Q)"
+            >
+              <RotateCw className="w-4 h-4" />
             </button>
 
             <button
