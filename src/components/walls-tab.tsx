@@ -932,6 +932,16 @@ export function WallsTab({
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         onSelectIdx(Math.min(walls.length - 1, selectedIdx + 1));
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (wall && wall.quads.length > 1) {
+          setActiveQuadIdx(prev => Math.max(0, prev - 1));
+        }
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (wall && wall.quads.length > 1) {
+          setActiveQuadIdx(prev => Math.min(wall.quads.length - 1, prev + 1));
+        }
       } else if (e.key === 'g' || e.key === 'G') {
         if (quad) setShowGrid(v => !v);
       } else if (e.key === 'h' || e.key === 'H') {

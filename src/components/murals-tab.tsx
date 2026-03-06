@@ -543,58 +543,54 @@ export function MuralsTab({
 
       ctx.drawImage(wallBitmap, sx, sy, sw, sh, dx, dy, dw, dh);
 
-      // Draw mural warped into quad
-      const quadObj = w.quads[activeQuadIdxRef.current];
-      const mural = quadObj?.murals[activeMuralIdx];
-      if (quadObj?.corners && mural) {
-        const muralBitmap = await getFullBitmap(mural.file);
-        if (selectedRef.current !== selectedIdx) return;
+      // Draw ALL quads with their murals
+      for (let qi = 0; qi < w.quads.length; qi++) {
+        const quadObj = w.quads[qi];
+        const isActive = qi === activeQuadIdxRef.current;
+        const mural = isActive ? quadObj?.murals[activeMuralIdx] : quadObj?.murals[0];
+        if (!quadObj?.corners) continue;
 
-        // Map normalized quad coords (0-1 relative to source image region) to canvas coords
+        // Map normalized quad coords to canvas coords
         const quadCanvas: [Corner, Corner, Corner, Corner] = quadObj.corners.map((corner) => ({
           x: dx + corner.x * dw,
           y: dy + corner.y * dh,
         })) as [Corner, Corner, Corner, Corner];
 
-        const muralAspect = muralBitmap.width / muralBitmap.height;
-        const rot = mural.rotation ?? 0;
-
-        // Compute quad aspect ratio from canvas coordinates
         const quadWidth = (dist(quadCanvas[0], quadCanvas[1]) + dist(quadCanvas[3], quadCanvas[2])) / 2;
         const quadHeight = (dist(quadCanvas[0], quadCanvas[3]) + dist(quadCanvas[1], quadCanvas[2])) / 2;
         const quadAspect = quadHeight > 0 ? quadWidth / quadHeight : 1;
 
-        // Cache layout for drag calculations
-        layoutRef.current = { dx, dy, dw, dh, quadCanvas, muralAspect, quadAspect };
-
-        ctx.save();
-        // Apply clip mask if set
-        const clipL = mural.clipLeft ?? 0;
-        const clipR = mural.clipRight ?? 0;
-        const clipT = mural.clipTop ?? 0;
-        const clipB = mural.clipBottom ?? 0;
-        if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
-          applyClipMask(ctx, clipL, clipR, clipT, clipB, quadCanvas);
+        // Cache layout for active quad's drag calculations
+        if (isActive && mural) {
+          const muralBitmapForLayout = await getFullBitmap(mural.file);
+          const muralAspect = muralBitmapForLayout.width / muralBitmapForLayout.height;
+          layoutRef.current = { dx, dy, dw, dh, quadCanvas, muralAspect, quadAspect };
         }
-        ctx.globalAlpha = mural.opacity ?? 1;
-        ctx.globalCompositeOperation = mural.blendMode ?? 'source-over';
-        drawWarped(
-          ctx,
-          muralBitmap,
-          quadCanvas,
-          mural.scale,
-          mural.offsetX,
-          mural.offsetY,
-          rot,
-          quadAspect,
-        );
-        ctx.restore();
+
+        if (mural) {
+          const muralBitmap = await getFullBitmap(mural.file);
+          if (selectedRef.current !== selectedIdx) return;
+          const rot = mural.rotation ?? 0;
+
+          ctx.save();
+          const clipL = mural.clipLeft ?? 0;
+          const clipR = mural.clipRight ?? 0;
+          const clipT = mural.clipTop ?? 0;
+          const clipB = mural.clipBottom ?? 0;
+          if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
+            applyClipMask(ctx, clipL, clipR, clipT, clipB, quadCanvas);
+          }
+          ctx.globalAlpha = (mural.opacity ?? 1) * (isActive ? 1 : 0.7);
+          ctx.globalCompositeOperation = mural.blendMode ?? 'source-over';
+          drawWarped(ctx, muralBitmap, quadCanvas, mural.scale, mural.offsetX, mural.offsetY, rot, quadAspect);
+          ctx.restore();
+        }
 
         // Draw quad outline
         ctx.save();
-        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = isActive ? 'rgba(99, 102, 241, 0.8)' : 'rgba(255,255,255,0.3)';
+        ctx.lineWidth = isActive ? 2 : 1;
+        ctx.setLineDash(isActive ? [4, 4] : [2, 3]);
         ctx.beginPath();
         ctx.moveTo(quadCanvas[0].x, quadCanvas[0].y);
         ctx.lineTo(quadCanvas[1].x, quadCanvas[1].y);
@@ -604,109 +600,103 @@ export function MuralsTab({
         ctx.stroke();
         ctx.restore();
 
-        // Draw clip region outline if active
-        if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
-          const [qtl2, qtr2, qbr2, qbl2] = quadCanvas;
-          const cu0 = Math.min(clipL, 0.45);
-          const cu1 = 1 - Math.min(clipR, 0.45);
-          const cv0 = Math.min(clipT, 0.45);
-          const cv1 = 1 - Math.min(clipB, 0.45);
-          const cc = [
-            bilerp(qtl2, qtr2, qbr2, qbl2, cu0, cv0),
-            bilerp(qtl2, qtr2, qbr2, qbl2, cu1, cv0),
-            bilerp(qtl2, qtr2, qbr2, qbl2, cu1, cv1),
-            bilerp(qtl2, qtr2, qbr2, qbl2, cu0, cv1),
-          ];
+        // Active quad with mural: draw clip region outline + handles
+        if (isActive && mural) {
+          const clipL = mural.clipLeft ?? 0;
+          const clipR = mural.clipRight ?? 0;
+          const clipT = mural.clipTop ?? 0;
+          const clipB = mural.clipBottom ?? 0;
+          if (clipL > 0 || clipR > 0 || clipT > 0 || clipB > 0) {
+            const [qtl2, qtr2, qbr2, qbl2] = quadCanvas;
+            const cu0 = Math.min(clipL, 0.45);
+            const cu1 = 1 - Math.min(clipR, 0.45);
+            const cv0 = Math.min(clipT, 0.45);
+            const cv1 = 1 - Math.min(clipB, 0.45);
+            const cc = [
+              bilerp(qtl2, qtr2, qbr2, qbl2, cu0, cv0),
+              bilerp(qtl2, qtr2, qbr2, qbl2, cu1, cv0),
+              bilerp(qtl2, qtr2, qbr2, qbl2, cu1, cv1),
+              bilerp(qtl2, qtr2, qbr2, qbl2, cu0, cv1),
+            ];
+            ctx.save();
+            ctx.strokeStyle = 'rgba(245,158,11,0.6)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(cc[0].x, cc[0].y);
+            cc.slice(1).forEach(c => ctx.lineTo(c.x, c.y));
+            ctx.closePath();
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // Compute muralAspect for handle drawing
+          const muralBitmapH = await getFullBitmap(mural.file);
+          const muralAspectH = muralBitmapH.width / muralBitmapH.height;
+          const rot = mural.rotation ?? 0;
+
+          // Draw mural bounding rectangle corners as handles
+          const cornersUV = getMuralCornersUV(
+            muralAspectH,
+            mural.scale,
+            mural.offsetX,
+            mural.offsetY,
+            rot,
+            quadAspect,
+          );
+
+          const [qtl, qtr, qbr, qbl] = quadCanvas;
+          const cornersPx = cornersUV.map(c => bilerp(qtl, qtr, qbr, qbl, c.x, c.y));
+
+          // Draw mural outline
           ctx.save();
-          ctx.strokeStyle = 'rgba(245,158,11,0.6)';
-          ctx.lineWidth = 1;
-          ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([]);
           ctx.beginPath();
-          ctx.moveTo(cc[0].x, cc[0].y);
-          cc.slice(1).forEach(c => ctx.lineTo(c.x, c.y));
+          ctx.moveTo(cornersPx[0].x, cornersPx[0].y);
+          ctx.lineTo(cornersPx[1].x, cornersPx[1].y);
+          ctx.lineTo(cornersPx[2].x, cornersPx[2].y);
+          ctx.lineTo(cornersPx[3].x, cornersPx[3].y);
           ctx.closePath();
           ctx.stroke();
           ctx.restore();
-        }
 
-        // Draw mural bounding rectangle corners as handles
-        const cornersUV = getMuralCornersUV(
-          muralAspect,
-          mural.scale,
-          mural.offsetX,
-          mural.offsetY,
-          rot,
-          quadAspect,
-        );
+          // Draw corner handles
+          for (const cp of cornersPx) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(cp.x, cp.y, 6, 0, Math.PI * 2);
+            ctx.fillStyle = 'white';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.restore();
+          }
 
-        // Convert UV corners to canvas coords via bilerp
-        const [qtl, qtr, qbr, qbl] = quadCanvas;
-        const cornersPx = cornersUV.map(c => bilerp(qtl, qtr, qbr, qbl, c.x, c.y));
-
-        // Draw mural outline
-        ctx.save();
-        ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        ctx.moveTo(cornersPx[0].x, cornersPx[0].y);
-        ctx.lineTo(cornersPx[1].x, cornersPx[1].y);
-        ctx.lineTo(cornersPx[2].x, cornersPx[2].y);
-        ctx.lineTo(cornersPx[3].x, cornersPx[3].y);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.restore();
-
-        // Draw corner handles
-        for (const cp of cornersPx) {
+          // Draw center handle
+          const centerUV = {
+            x: 0.5 + mural.offsetX / 100,
+            y: 0.5 + mural.offsetY / 100,
+          };
+          const centerPx = bilerp(qtl, qtr, qbr, qbl, centerUV.x, centerUV.y);
           ctx.save();
           ctx.beginPath();
-          ctx.arc(cp.x, cp.y, 6, 0, Math.PI * 2);
-          ctx.fillStyle = 'white';
+          ctx.arc(centerPx.x, centerPx.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.6)';
           ctx.fill();
-          ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+          ctx.lineWidth = 1;
           ctx.stroke();
           ctx.restore();
         }
 
-        // Draw center handle (small crosshair)
-        const centerUV = {
-          x: 0.5 + mural.offsetX / 100,
-          y: 0.5 + mural.offsetY / 100,
-        };
-        const centerPx = bilerp(qtl, qtr, qbr, qbl, centerUV.x, centerUV.y);
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(centerPx.x, centerPx.y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255,255,255,0.6)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.restore();
-
-      } else if (quadObj?.corners) {
-        // Draw quad outline only (no mural selected)
-        const quadCanvas = quadObj.corners.map((corner) => ({
-          x: dx + corner.x * dw,
-          y: dy + corner.y * dh,
-        }));
-        ctx.save();
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([6, 4]);
-        ctx.beginPath();
-        ctx.moveTo(quadCanvas[0].x, quadCanvas[0].y);
-        ctx.lineTo(quadCanvas[1].x, quadCanvas[1].y);
-        ctx.lineTo(quadCanvas[2].x, quadCanvas[2].y);
-        ctx.lineTo(quadCanvas[3].x, quadCanvas[3].y);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.restore();
-
-        layoutRef.current = null;
-      }
+        // Clear layout if active quad has no mural
+        if (isActive && !mural) {
+          layoutRef.current = null;
+        }
+      } // end quad loop
     } finally {
       ctx.restore(); // pop zoom/pan
       setLoading(false);
@@ -906,10 +896,25 @@ export function MuralsTab({
       const active = document.activeElement as HTMLElement | null;
       if (active && active.closest('[data-sidebar]')) return;
 
-      // Left/Right: cycle mural alternatives
+      // Left/Right: cycle quads
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         const dir = e.key === 'ArrowLeft' ? -1 : 1;
+        const w = wallsRef.current[selectedRef.current];
+        if (!w || w.quads.length <= 1) return;
+        setActiveQuadIdx(prev => {
+          const next = prev + dir;
+          if (next < 0 || next >= w.quads.length) return prev;
+          return next;
+        });
+        setActiveMuralIdx(0);
+        return;
+      }
+
+      // Up/Down: cycle mural alternatives
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        const dir = e.key === 'ArrowUp' ? -1 : 1;
         setActiveMuralIdx(prev => {
           const w = wallsRef.current[selectedRef.current];
           const qMurals = w?.quads[activeQuadIdxRef.current]?.murals;
@@ -917,37 +922,6 @@ export function MuralsTab({
           return Math.max(0, Math.min(qMurals.length - 1, prev + dir));
         });
         return;
-      }
-
-      // Up/Down: cycle walls
-      let dir = 0;
-      if (e.key === 'ArrowUp') dir = -1;
-      if (e.key === 'ArrowDown') dir = 1;
-      if (dir === 0) return;
-
-      e.preventDefault();
-
-      if (pending === null) {
-        pending = dir;
-        rafId = requestAnimationFrame(() => {
-          const cur = selectedRef.current;
-          const ws = wallsRef.current;
-          if (ws.length === 0) { pending = null; return; }
-
-          // Navigate only among walls with quads
-          let next = cur + pending!;
-          next = Math.max(0, Math.min(ws.length - 1, next));
-          // Skip walls without quad
-          while (next >= 0 && next < ws.length && ws[next].quads.length === 0) {
-            next += pending! > 0 ? 1 : -1;
-          }
-          if (next >= 0 && next < ws.length && ws[next].quads.length > 0 && next !== cur) {
-            onSelectIdx(next);
-          }
-          pending = null;
-        });
-      } else {
-        pending += dir;
       }
     };
 
@@ -1361,26 +1335,6 @@ export function MuralsTab({
 
         {/* ---- Right Sidebar: Mural alternatives ---- */}
         <div data-sidebar className="w-[200px] border-l bg-white flex flex-col">
-          {/* Quad tabs */}
-          {selectedWall && selectedWall.quads.length > 1 && (
-            <div className="flex gap-1 p-2 border-b border-slate-200">
-              {selectedWall.quads.map((q, qi) => (
-                <button
-                  key={q.id}
-                  onClick={() => { setActiveQuadIdx(qi); setActiveMuralIdx(0); }}
-                  className={cn(
-                    'flex-1 px-2 py-1 rounded text-xs font-medium transition-colors',
-                    qi === activeQuadIdx
-                      ? 'bg-indigo-500 text-white'
-                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                  )}
-                >
-                  Q{qi + 1}
-                </button>
-              ))}
-            </div>
-          )}
-
           {/* Header + load button */}
           <div className="p-3 border-b">
             <button
@@ -1841,6 +1795,25 @@ export function MuralsTab({
               <span className="font-medium">
                 Wall {selectedIdx + 1} / {walls.length}
               </span>
+              {selectedWall && selectedWall.quads.length > 1 && (
+                <div className="flex gap-1">
+                  {selectedWall.quads.map((q, qi) => (
+                    <button
+                      key={q.id}
+                      onClick={() => { setActiveQuadIdx(qi); setActiveMuralIdx(0); }}
+                      className={cn(
+                        'px-2 py-0.5 rounded text-xs font-medium transition-colors',
+                        qi === activeQuadIdx
+                          ? 'bg-indigo-500 text-white'
+                          : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                      )}
+                      title={`Switch to quad ${qi + 1} (←/→)`}
+                    >
+                      Q{qi + 1}
+                    </button>
+                  ))}
+                </div>
+              )}
               <span className="text-gray-400 text-xs">
                 {muralCount} mural{muralCount !== 1 ? 's' : ''}
               </span>

@@ -269,8 +269,7 @@ export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
     if (!entry) return;
 
     const wall = entry.wall;
-    const quadObj = wall.quads.find(q => q.murals.length > 0);
-    const mural = quadObj?.murals[muralIdxRef.current];
+    const currentMuralIdx = muralIdxRef.current;
 
     // Draw wall image fitted
     const wallBitmap = await getFullBitmap(wall.blob);
@@ -292,23 +291,24 @@ export function PresentTab({ walls, onWallsChange }: PresentTabProps) {
 
     ctx.drawImage(wallBitmap, sx, sy, sw, sh, dx, dy, dw, dh);
 
-    // Warp mural into quad
-    if (mural && quadObj?.corners) {
+    // Transform quad from normalized 0-1 space to canvas-space
+    const toCanvas = (pt: Corner): Corner => ({
+      x: dx + pt.x * dw,
+      y: dy + pt.y * dh,
+    });
+
+    // Draw ALL quads with their murals
+    for (const quadObj of wall.quads) {
+      const mural = quadObj.murals[Math.min(currentMuralIdx, quadObj.murals.length - 1)];
+      if (!mural || !quadObj.corners) continue;
+
       const muralBitmap = await getFullBitmap(mural.file);
 
-      // Transform quad from normalized 0-1 space to canvas-space
-      const toCanvas = (pt: Corner): Corner => ({
-        x: dx + pt.x * dw,
-        y: dy + pt.y * dh,
-      });
-
-      // Compute quad aspect ratio from canvas coordinates
       const quadCanvasPts = quadObj.corners.map(toCanvas);
       const qw = (dist(quadCanvasPts[0], quadCanvasPts[1]) + dist(quadCanvasPts[3], quadCanvasPts[2])) / 2;
       const qh = (dist(quadCanvasPts[0], quadCanvasPts[3]) + dist(quadCanvasPts[1], quadCanvasPts[2])) / 2;
       const quadAspect = qh > 0 ? qw / qh : 1;
 
-      // Apply clip mask if set
       const clipL = mural.clipLeft ?? 0;
       const clipR = mural.clipRight ?? 0;
       const clipT = mural.clipTop ?? 0;
